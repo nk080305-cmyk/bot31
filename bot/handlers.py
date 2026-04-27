@@ -47,7 +47,7 @@ def _format_violation(v: dict) -> str:
     lines = [
         f"📋 *Данные нарушения*",
         f"  Номер дела: `{v.get('case_number') or '—'}`",
-        f"  Дата/время: `{v.get('violation_date') or '—'} {v.get('violation_time') or ''}`.strip()",
+        f"  Дата/время: `{((v.get('violation_date') or '—') + ' ' + (v.get('violation_time') or '')).strip()}`",
         f"  Место: `{v.get('location') or '—'}`",
         f"  Тип нарушения: `{v.get('violation_type') or '—'}`",
         f"  Сумма штрафа: `{v.get('fine_amount') or '—'}`",
