@@ -3,6 +3,8 @@ import pytest
 
 from bot.formatters import format_fine_details
 from bot.handlers.edit import _validate_field
+from bot.i18n import t
+from bot.keyboards import appeal_reason_keyboard, confirmation_keyboard
 
 
 # ---------------------------------------------------------------------------
@@ -135,3 +137,95 @@ class TestFormatFineDetails:
         details = {"fine_number": self._make_field("1", 0.9)}
         text, _ = format_fine_details(details, "he")
         assert "גבוה" in text
+
+
+# ---------------------------------------------------------------------------
+# confirmation_keyboard
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmationKeyboard:
+    @pytest.mark.parametrize("lang", ["ru", "en", "he"])
+    def test_has_two_buttons(self, lang):
+        kb = confirmation_keyboard(lang)
+        all_buttons = [btn for row in kb.inline_keyboard for btn in row]
+        assert len(all_buttons) == 2
+
+    @pytest.mark.parametrize("lang", ["ru", "en", "he"])
+    def test_confirm_callback(self, lang):
+        kb = confirmation_keyboard(lang)
+        all_buttons = [btn for row in kb.inline_keyboard for btn in row]
+        callbacks = [btn.callback_data for btn in all_buttons]
+        assert "confirm_details" in callbacks
+
+    @pytest.mark.parametrize("lang", ["ru", "en", "he"])
+    def test_incorrect_callback(self, lang):
+        kb = confirmation_keyboard(lang)
+        all_buttons = [btn for row in kb.inline_keyboard for btn in row]
+        callbacks = [btn.callback_data for btn in all_buttons]
+        assert "edit_details" in callbacks
+
+    def test_button_labels_localised(self):
+        kb_ru = confirmation_keyboard("ru")
+        kb_en = confirmation_keyboard("en")
+        ru_texts = [btn.text for row in kb_ru.inline_keyboard for btn in row]
+        en_texts = [btn.text for row in kb_en.inline_keyboard for btn in row]
+        assert ru_texts != en_texts
+
+
+# ---------------------------------------------------------------------------
+# appeal_reason_keyboard
+# ---------------------------------------------------------------------------
+
+
+class TestAppealReasonKeyboard:
+    @pytest.mark.parametrize("lang", ["ru", "en", "he"])
+    def test_has_five_buttons(self, lang):
+        kb = appeal_reason_keyboard(lang)
+        all_buttons = [btn for row in kb.inline_keyboard for btn in row]
+        assert len(all_buttons) == 5
+
+    @pytest.mark.parametrize("lang", ["ru", "en", "he"])
+    def test_reason_callbacks(self, lang):
+        kb = appeal_reason_keyboard(lang)
+        all_buttons = [btn for row in kb.inline_keyboard for btn in row]
+        callbacks = {btn.callback_data for btn in all_buttons}
+        expected = {"reason_1", "reason_2", "reason_3", "reason_4", "reason_other"}
+        assert callbacks == expected
+
+    def test_button_labels_localised(self):
+        kb_ru = appeal_reason_keyboard("ru")
+        kb_en = appeal_reason_keyboard("en")
+        ru_texts = [btn.text for row in kb_ru.inline_keyboard for btn in row]
+        en_texts = [btn.text for row in kb_en.inline_keyboard for btn in row]
+        assert ru_texts != en_texts
+
+
+# ---------------------------------------------------------------------------
+# i18n – new locale keys
+# ---------------------------------------------------------------------------
+
+
+class TestNewLocaleKeys:
+    NEW_KEYS = [
+        "btn_data_correct",
+        "btn_data_incorrect",
+        "choose_appeal_reason",
+        "reason_1",
+        "reason_2",
+        "reason_3",
+        "reason_4",
+        "reason_other",
+        "enter_appeal_reason",
+    ]
+
+    @pytest.mark.parametrize("lang", ["ru", "en", "he"])
+    @pytest.mark.parametrize("key", NEW_KEYS)
+    def test_key_exists_and_not_fallback(self, lang, key):
+        """Each new locale key must resolve to a real translation, not the bare key."""
+        value = t(key, lang)
+        assert value != key, f"Missing translation: key={key!r} lang={lang!r}"
+        # All translated strings should be at least a few characters long
+        # (even the shortest expected text like "✅" followed by a word)
+        MIN_TRANSLATION_LENGTH = 3
+        assert len(value) > MIN_TRANSLATION_LENGTH
