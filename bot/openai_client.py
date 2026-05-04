@@ -55,7 +55,7 @@ Respond ONLY with valid JSON. No explanation, no markdown fences."""
 # ---------------------------------------------------------------------------
 
 _APPEAL_SYSTEM = (
-    "You are a legal expert specialising in Israeli traffic law. "
+    "You are a legal expert specializing in Israeli traffic law. "
     "Write formal Hebrew appeal letters for traffic fines. "
     "Respond ONLY in Hebrew."
 )
