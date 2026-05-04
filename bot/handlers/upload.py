@@ -8,27 +8,24 @@ Pipeline
 4. Extract structured fine data via OpenAI.
 5. Encrypt the raw file and persist to /data/cases/.
 6. Store an encrypted case record in SQLite.
-7. Present the extracted data to the user and offer to generate an appeal.
+7. Present the extracted data to the user with Confirm / Edit / Back buttons.
 """
 import logging
 import os
 import tempfile
 import uuid
-from typing import Tuple
 
 from aiogram import F, Router
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message
 
 from bot.config import CASES_DIR, MAX_FILE_SIZE
 from bot.db import add_audit_log, get_or_create_user, save_case
 from bot.encryption import encrypt_bytes
+from bot.formatters import format_fine_details
 from bot.i18n import t
 from bot.ocr import extract_text
-from bot.openai_client import extract_fine_details
+from bot.openai_client import extract_fine_details as ai_extract_fine_details
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -37,70 +34,12 @@ _ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _appeal_keyboard(lang: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=t("btn_appeal", lang), callback_data="generate_appeal")]
-        ]
-    )
-
-
-def _format_fine_details(details: dict, lang: str) -> Tuple[str, bool]:
-    """Render extracted fine fields as a human-readable string.
-
-    Returns
-    -------
-    (formatted_text, has_low_confidence)
-    """
-    field_labels = {
-        "fine_number": t("fine_number", lang),
-        "fine_date": t("fine_date", lang),
-        "fine_amount": t("fine_amount", lang),
-        "violation": t("fine_violation", lang),
-        "vehicle_plate": t("fine_vehicle", lang),
-        "location": t("fine_location", lang),
-        "payment_deadline": t("fine_deadline", lang),
-    }
-
-    lines = []
-    has_low = False
-
-    for field, label in field_labels.items():
-        data = details.get(field)
-        if not isinstance(data, dict):
-            continue
-        value = data.get("value") or "—"
-        confidence: float = data.get("confidence", 0.0)
-
-        if confidence >= 0.8:
-            emoji = "✅"
-        elif confidence >= 0.5:
-            emoji = "⚠️"
-            has_low = True
-        else:
-            emoji = "❌"
-            has_low = True
-
-        conf_label = (
-            t("confidence_high", lang)
-            if confidence >= 0.8
-            else t("confidence_medium", lang)
-            if confidence >= 0.5
-            else t("confidence_low", lang)
-        )
-        lines.append(f"{emoji} {label}: {value}  [{conf_label}]")
-
-    return "\n".join(lines), has_low
-
-
-# ---------------------------------------------------------------------------
 # Core processing function
 # ---------------------------------------------------------------------------
 
-async def _process_file(message: Message, file_id: str, file_name: str, file_size: int) -> None:
+async def _process_file(
+    message: Message, state: FSMContext, file_id: str, file_name: str, file_size: int
+) -> None:
     user = await get_or_create_user(message.from_user.id)
     lang = user.get("language", "ru")
 
@@ -140,7 +79,7 @@ async def _process_file(message: Message, file_id: str, file_name: str, file_siz
 
         # --- OpenAI extraction ---
         try:
-            details = await extract_fine_details(ocr_text)
+            details = await ai_extract_fine_details(ocr_text)
         except Exception as exc:
             logger.error("Extraction failed for user_id=%s: %s", message.from_user.id, exc)
             await message.answer(t("extraction_failed", lang))
@@ -177,14 +116,16 @@ async def _process_file(message: Message, file_id: str, file_name: str, file_siz
         logger.info("Case %s created for user_id=%s", case_id, message.from_user.id)
 
         # --- Present results ---
-        details_text, has_low = _format_fine_details(details, lang)
+        from bot.handlers.edit import confirmation_keyboard  # local import avoids circular
+
+        details_text, has_low = format_fine_details(details, lang)
         if details_text:
             await message.answer(t("fine_details", lang, details=details_text))
 
         if has_low:
             await message.answer(t("low_confidence", lang))
 
-        await message.answer(t("confirm_details", lang), reply_markup=_appeal_keyboard(lang))
+        await message.answer(t("confirm_details", lang), reply_markup=confirmation_keyboard(lang))
 
     except Exception as exc:
         logger.error("Unexpected error for user_id=%s: %s", message.from_user.id, exc)
@@ -201,17 +142,19 @@ async def _process_file(message: Message, file_id: str, file_name: str, file_siz
 # Handlers
 # ---------------------------------------------------------------------------
 
+
 @router.message(F.photo)
-async def handle_photo(message: Message) -> None:
+async def handle_photo(message: Message, state: FSMContext) -> None:
     photo = message.photo[-1]  # largest available resolution
     file_name = f"{photo.file_unique_id}.jpg"
     file_size = photo.file_size or 0
     logger.info("Photo received: user_id=%s size=%d", message.from_user.id, file_size)
-    await _process_file(message, photo.file_id, file_name, file_size)
+    await state.clear()  # reset any ongoing edit session
+    await _process_file(message, state, photo.file_id, file_name, file_size)
 
 
 @router.message(F.document)
-async def handle_document(message: Message) -> None:
+async def handle_document(message: Message, state: FSMContext) -> None:
     doc = message.document
     file_name = doc.file_name or "document"
     file_size = doc.file_size or 0
@@ -227,4 +170,5 @@ async def handle_document(message: Message) -> None:
         lang = user.get("language", "ru")
         await message.answer(t("unsupported_format", lang))
         return
-    await _process_file(message, doc.file_id, file_name, file_size)
+    await state.clear()  # reset any ongoing edit session
+    await _process_file(message, state, doc.file_id, file_name, file_size)
