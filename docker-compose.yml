@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    volumes:
+      - bot_data:/data
+    env_file: .env
+    restart: unless-stopped
+
+volumes:
+  bot_data:
