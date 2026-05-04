@@ -233,7 +233,7 @@ async def handle_field_value(message: Message, state: FSMContext) -> None:
         details[field] = {}
     details[field]["value"] = value
     details[field]["manual"] = True
-    # Remove AI confidence – this field was set by the user, not extracted
+    # Remove AI-derived confidence - this field was set by the user, not extracted
     details[field].pop("confidence", None)
 
     await update_case_details(case["id"], details)

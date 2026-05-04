@@ -56,7 +56,10 @@ class TestValidateField:
         error_en = _validate_field("fine_date", "bad-date", "en")
         assert error_ru is not None
         assert error_en is not None
-        assert error_ru != error_en  # different languages → different strings
+        # Russian error should contain Cyrillic text
+        assert any("\u0400" <= c <= "\u04FF" for c in error_ru)
+        # English error should not be the same as Russian
+        assert error_ru != error_en
 
 
 # ---------------------------------------------------------------------------
