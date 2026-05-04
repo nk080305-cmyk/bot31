@@ -39,7 +39,7 @@ class AppealStates(StatesGroup):
 # Hebrew template texts for fixed appeal reasons
 # ---------------------------------------------------------------------------
 
-_REASON_TEXTS_HE: dict[str, str] = {
+_REASON_TEXTS_HE: Dict[str, str] = {
     "reason_1": "התמרור/הסימון לא היה גלוי/ברור לעין",
     "reason_2": "שגיאה בנתוני הזיהוי (לוחית רישוי/שעה/מקום)",
     "reason_3": "עצירה קצרה עקב הכרח/כוח עליון",

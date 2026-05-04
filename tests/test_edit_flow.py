@@ -225,4 +225,7 @@ class TestNewLocaleKeys:
         """Each new locale key must resolve to a real translation, not the bare key."""
         value = t(key, lang)
         assert value != key, f"Missing translation: key={key!r} lang={lang!r}"
-        assert len(value) > 3
+        # All translated strings should be at least a few characters long
+        # (even the shortest expected text like "✅" followed by a word)
+        MIN_TRANSLATION_LENGTH = 3
+        assert len(value) > MIN_TRANSLATION_LENGTH
