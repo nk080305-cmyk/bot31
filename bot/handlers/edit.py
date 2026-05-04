@@ -31,6 +31,7 @@ from aiogram.types import (
 from bot.db import add_audit_log, get_latest_case, get_or_create_user, update_case_details
 from bot.formatters import FIELD_KEYS, field_label, format_fine_details
 from bot.i18n import t
+from bot.keyboards import confirmation_keyboard
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -46,29 +47,8 @@ class EditStates(StatesGroup):
 
 
 # ---------------------------------------------------------------------------
-# Keyboards
+# Keyboards (field-selection and value-input; confirmation_keyboard is in bot.keyboards)
 # ---------------------------------------------------------------------------
-
-
-def confirmation_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """3-button keyboard shown under the fine-details summary."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=t("btn_confirm", lang), callback_data="generate_appeal"
-                ),
-                InlineKeyboardButton(
-                    text=t("btn_edit", lang), callback_data="edit_details"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=t("btn_back", lang), callback_data="back_to_start"
-                ),
-            ],
-        ]
-    )
 
 
 def _field_selection_keyboard(lang: str) -> InlineKeyboardMarkup:
@@ -252,8 +232,9 @@ async def handle_field_value(message: Message, state: FSMContext) -> None:
     if not isinstance(details.get(field), dict):
         details[field] = {}
     details[field]["value"] = value
-    details[field]["confidence"] = 1.0
     details[field]["manual"] = True
+    # Remove AI confidence – this field was set by the user, not extracted
+    details[field].pop("confidence", None)
 
     await update_case_details(case["id"], details)
     await add_audit_log(

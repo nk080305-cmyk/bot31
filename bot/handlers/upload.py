@@ -24,6 +24,7 @@ from bot.db import add_audit_log, get_or_create_user, save_case
 from bot.encryption import encrypt_bytes
 from bot.formatters import format_fine_details
 from bot.i18n import t
+from bot.keyboards import confirmation_keyboard
 from bot.ocr import extract_text
 from bot.openai_client import extract_fine_details as ai_extract_fine_details
 
@@ -116,8 +117,6 @@ async def _process_file(
         logger.info("Case %s created for user_id=%s", case_id, message.from_user.id)
 
         # --- Present results ---
-        from bot.handlers.edit import confirmation_keyboard  # local import avoids circular
-
         details_text, has_low = format_fine_details(details, lang)
         if details_text:
             await message.answer(t("fine_details", lang, details=details_text))
