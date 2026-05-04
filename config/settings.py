@@ -23,7 +23,7 @@ TWOCAPTCHA_API_KEY: str = os.getenv("TWOCAPTCHA_API_KEY", "")
 # Israeli police traffic violations appeal portal
 APPEAL_URL: str = os.getenv(
     "APPEAL_URL",
-    "https://www.gov.il/he/Departments/Guides/police_traffic_violations_appeal",
+    "https://www.gov.il/he/service/traffic_fines",
 )
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
