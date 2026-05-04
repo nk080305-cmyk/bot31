@@ -18,6 +18,7 @@ from bot.config import CASES_DIR, DATA_DIR, DB_PATH, LOG_LEVEL, TELEGRAM_BOT_TOK
 from bot.db import cleanup_expired, init_db
 from bot.handlers.appeal import router as appeal_router
 from bot.handlers.common import router as common_router
+from bot.handlers.edit import router as edit_router
 from bot.handlers.upload import router as upload_router
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(common_router)
     dp.include_router(upload_router)
+    dp.include_router(edit_router)
     dp.include_router(appeal_router)
 
     logger.info("Bot starting (DB=%s)", DB_PATH)

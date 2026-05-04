@@ -155,6 +155,36 @@ async def get_latest_case(user_id: int) -> Optional[Dict[str, Any]]:
     return result
 
 
+async def update_case_details(case_id: str, details: Dict[str, Any]) -> None:
+    """Replace the ``details`` sub-dict inside an existing case record.
+
+    The rest of the case data (ocr_text, original_file_name, …) is preserved.
+    """
+    from bot.encryption import decrypt, encrypt  # local import avoids circular dependency
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT encrypted_data FROM cases WHERE id = ?", (case_id,)
+        ) as cur:
+            row = await cur.fetchone()
+
+        if not row:
+            logger.warning("update_case_details: case %s not found", case_id)
+            return
+
+        data = json.loads(decrypt(row[0]))
+        data["details"] = details
+        enc_data = encrypt(json.dumps(data, ensure_ascii=False))
+
+        await db.execute(
+            "UPDATE cases SET encrypted_data = ? WHERE id = ?",
+            (enc_data, case_id),
+        )
+        await db.commit()
+
+    logger.info("Case %s details updated", case_id)
+
+
 async def delete_user_data(user_id: int) -> Tuple[int, List[str]]:
     """
     Delete all cases for *user_id*.
