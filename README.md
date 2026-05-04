@@ -13,7 +13,8 @@ Supports **Russian 🇷🇺 / Hebrew 🇮🇱 / English 🇬🇧** UI; appeal le
 | **File upload** | JPG, PNG, PDF – max 15 MB |
 | **OCR** | Tesseract (heb+eng) with OpenCV preprocessing; PSM 6/4/11 with best-result heuristics |
 | **AI extraction** | OpenAI GPT-4o extracts structured fields with per-field confidence scores |
-| **Data correction** | After extraction, inline Edit button lets users fix any field (fine number, violation code, date, amount, plate, location, deadline) before generating the appeal |
+| **Data correction** | After extraction, ✅/❌ inline buttons let users confirm or fix any field (fine number, violation text, date, amount, licence plate, location, deadline) before generating the appeal |
+| **Appeal reason selection** | After confirming data, choose from 5 localised reasons (sign not visible, data error, force majeure, permit, or free text); reason is embedded in the Hebrew letter |
 | **Appeal generation** | Formal Hebrew letter using confirmed facts only |
 | **Multilingual UI** | JSON locale dictionaries (ru/he/en), switchable via `/language` |
 | **Encrypted storage** | Personal data encrypted at rest with Fernet (PBKDF2-derived key); 7-day TTL |
@@ -62,20 +63,31 @@ docker compose logs -f
 
 ---
 
-## Correcting Extracted Data
+## Correcting Extracted Data & Choosing an Appeal Reason
 
-After the bot processes your fine notice it displays the extracted fields with confidence indicators and three inline buttons:
+After the bot processes your fine notice it displays the extracted fields with confidence indicators and two inline buttons:
 
-- **✅ All correct** – proceed directly to generating the appeal letter.
-- **✏️ Edit** – open the field-selection menu where you can pick any field (fine number, violation code, date, amount, licence plate, location, or payment deadline) and type a corrected value.
-- **↩️ Back** – return to the "send your fine notice" prompt.
+- **✅ Data is correct** – confirm the data and proceed to appeal-reason selection.
+- **❌ Data is incorrect** – open the field-selection menu where you can pick any field (fine number, violation text, date, amount, licence plate, location, or payment deadline) and type a corrected value.
 
 Inside the edit menu:
 - Tap a field to select it, then type the corrected value.
 - **↩️ Back** from the value-prompt returns you to the field list.
-- **↩️ Back** from the field list returns you to the summary with all three buttons.
+- **↩️ Back** from the field list returns you to the summary with the ✅/❌ buttons.
 
-Corrected fields are marked with ✏️ in the summary and are used when generating the appeal letter.
+Corrected fields are marked with ✏️ in the summary (instead of the AI confidence label) and are used when generating the appeal letter.
+
+### Appeal Reason Selection
+
+After pressing **✅ Data is correct**, the bot asks you to choose a reason for the appeal (buttons are shown in your chosen language):
+
+1. **Sign/markings not visible or unclear**
+2. **Error in identification/data (plate/time/place)**
+3. **Short stop due to necessity / force majeure**
+4. **Permit/authorization to park/stop**
+5. **Other** – type your own reason in any language
+
+The selected reason is included in the formal Hebrew appeal letter.
 
 ---
 

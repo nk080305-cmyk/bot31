@@ -8,7 +8,7 @@ Two operations are exposed:
 """
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from openai import AsyncOpenAI
 
@@ -72,7 +72,7 @@ _APPEAL_PROMPT = """\
 
 נתוני הדוח:
 {fine_details}
-
+{reason_section}
 כתוב את מכתב הערר בלבד, ללא הסברים נוספים."""
 
 
@@ -107,23 +107,43 @@ async def extract_fine_details(ocr_text: str) -> Dict[str, Any]:
         raise
 
 
-async def generate_appeal(fine_details: Dict[str, Any]) -> str:
+async def generate_appeal(
+    fine_details: Dict[str, Any], appeal_reason: Optional[str] = None
+) -> str:
     """Call OpenAI to generate a formal Hebrew appeal letter.
 
-    Only fields with non-null values and confidence ≥ 0.5 are passed to the
-    model so that unconfirmed data does not influence the letter.
+    Only fields with non-null values and either:
+    - confidence ≥ 0.5, or
+    - manually edited by the user (``manual=True``)
+    are passed to the model so that unconfirmed data does not influence the letter.
+
+    Parameters
+    ----------
+    fine_details:
+        Structured fine data as returned by :func:`extract_fine_details` (or
+        updated via the edit flow).
+    appeal_reason:
+        Optional reason string (Hebrew or any language) that explains why the
+        user is appealing.  When provided it is included in the prompt so the
+        model can reference it in the letter body.
     """
-    # Filter to confirmed fields only
+    # Filter to confirmed / manually edited fields only
     confirmed: Dict[str, str] = {}
     for field, data in fine_details.items():
         if isinstance(data, dict):
             value = data.get("value")
             confidence = data.get("confidence", 0.0)
-            if value and confidence >= 0.5:
+            is_manual = data.get("manual", False)
+            if value and (is_manual or confidence >= 0.5):
                 confirmed[field] = value
 
     details_str = json.dumps(confirmed, ensure_ascii=False, indent=2)
-    prompt = _APPEAL_PROMPT.format(fine_details=details_str)
+    reason_section = (
+        f"\nטעם הערר:\n{appeal_reason}\n" if appeal_reason else ""
+    )
+    prompt = _APPEAL_PROMPT.format(
+        fine_details=details_str, reason_section=reason_section
+    )
 
     try:
         response = await _client.chat.completions.create(
