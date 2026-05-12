@@ -7,8 +7,11 @@ from typing import Iterable, List
 _MIN_FINE_NUMBER_LEN = 6
 _MAX_FINE_NUMBER_LEN = 12
 _SEPARATORS_RE = re.compile(r"[ \t\-./:,_]+")
+_CANDIDATE_MIN_REPEAT = _MIN_FINE_NUMBER_LEN - 1
+_CANDIDATE_MAX_REPEAT = _MAX_FINE_NUMBER_LEN - 1
 _CANDIDATE_RE = re.compile(
-    rf"(?<!\d)(?:\d[ \t\-./:,_]?){{{_MIN_FINE_NUMBER_LEN - 1},{_MAX_FINE_NUMBER_LEN - 1}}}\d(?!\d)"
+    r"(?<!\d)(?:\d[ \t\-./:,_]?){%d,%d}\d(?!\d)"
+    % (_CANDIDATE_MIN_REPEAT, _CANDIDATE_MAX_REPEAT)
 )
 _KEYWORD_RE = re.compile(
     r"(מס(?:פר)?\s*דוח|номер\s*штрафа|fine\s*(?:number|no|#)|ticket\s*(?:number|no|#))",

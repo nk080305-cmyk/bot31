@@ -33,7 +33,7 @@ def test_pick_best_fine_number():
     assert pick_best_fine_number(["12345678", "12345678", "999999"]) == "12345678"
 
 
-def test_ensure_fine_number_uses_focused_fallback():
+def test_ensure_fine_number_replaces_invalid_with_focused_result():
     async def fake_extractor(_ocr_text: str, _numeric_ocr_text: str):
         return {"fine_number": "51-9032-19", "confidence": 0.91}
 

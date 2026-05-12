@@ -186,9 +186,6 @@ def ocr_image_with_numeric(image_path: str) -> Tuple[str, str]:
     ``general_text`` is produced from the standard heb+eng OCR pipeline.
     ``numeric_text`` is produced from a numeric-focused OCR pass for better
     fine-number recovery.
-
-    Returns:
-        Tuple[str, str]: ``(general_text, numeric_text)``.
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -224,6 +221,9 @@ def ocr_pdf_with_numeric(pdf_path: str) -> Tuple[str, str]:
 
     The PDF page is converted to PNG and then processed by both the standard
     OCR pipeline and a numeric-focused OCR pipeline.
+
+    Returns:
+        Tuple[str, str]: ``(general_text, numeric_text)``.
     """
     from pdf2image import convert_from_path  # imported here to keep startup light
 
