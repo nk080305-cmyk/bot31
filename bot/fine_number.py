@@ -1,4 +1,4 @@
-"""Helpers for normalising and validating fine numbers."""
+"""Helpers for normalizing and validating fine numbers."""
 import re
 import unicodedata
 from collections import Counter

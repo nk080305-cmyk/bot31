@@ -9,8 +9,8 @@ Steps
    - Adaptive thresholding
    - Deskewing (if rotation > 0.5°)
 3. Run Tesseract with language ``heb+eng`` and PSM modes 6, 4, and 11.
-4. Run an extra numeric-only OCR pass for better fine-number recovery.
-5. Score each result with a heuristic function and return the best one.
+4. Score each result with a heuristic function and keep the best general OCR text.
+5. Run an extra numeric-only OCR pass for better fine-number recovery.
 """
 import logging
 import os

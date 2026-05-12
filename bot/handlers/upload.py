@@ -52,10 +52,10 @@ async def _ensure_fine_number(
     """Normalize/recover ``fine_number`` with staged fallbacks.
 
     Strategy:
-    1) normalize and validate model output;
-    2) try regex/keyword heuristics from both OCR texts;
-    3) if still weak/invalid, call a focused LLM extractor for fine_number only;
-    4) keep a low-confidence placeholder when no valid candidate is found.
+    - Normalize and validate model output.
+    - Try regex/keyword heuristics from both OCR texts.
+    - If still weak/invalid, call a focused LLM extractor for fine_number only.
+    - Keep a low-confidence placeholder when no valid candidate is found.
 
     Returns the updated ``details`` dictionary with a ``fine_number`` field.
     """
