@@ -105,11 +105,7 @@ async def _ensure_fine_number(
 # ---------------------------------------------------------------------------
 
 async def _process_file(
-    message: Message,
-    state: FSMContext,
-    file_id: str,
-    file_name: str,
-    file_size: int,
+    message: Message, state: FSMContext, file_id: str, file_name: str, file_size: int
 ) -> None:
     user = await get_or_create_user(message.from_user.id)
     lang = user.get("language", "ru")
