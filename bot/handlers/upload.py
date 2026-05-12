@@ -14,7 +14,7 @@ import logging
 import os
 import tempfile
 import uuid
-from typing import Any, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -46,7 +46,7 @@ async def _ensure_fine_number(
     details: Dict[str, Any],
     ocr_text: str,
     numeric_ocr_text: str,
-    focused_extractor: Callable[[str, str], Any] = ai_extract_fine_number_only,
+    focused_extractor: Callable[[str, str], Awaitable[Dict[str, Any]]] = ai_extract_fine_number_only,
 ) -> Dict[str, Any]:
     """Normalize/recover ``fine_number`` with staged fallbacks.
 

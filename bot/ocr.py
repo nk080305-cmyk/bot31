@@ -190,7 +190,8 @@ def ocr_image_with_numeric(image_path: str) -> Tuple[str, str]:
     Returns
     -------
     Tuple[str, str]
-        ``(general_text, numeric_text)``.
+        ``(general_text, numeric_text)``. Any failed OCR pass returns an empty
+        string for that element.
     """
     img = cv2.imread(image_path)
     if img is None:
