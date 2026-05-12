@@ -7,7 +7,7 @@ choosing_reason   – user is looking at the appeal-reason keyboard
 entering_reason_other – user is typing a custom appeal reason (option 5)
 """
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command
