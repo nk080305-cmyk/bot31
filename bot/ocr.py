@@ -9,7 +9,8 @@ Steps
    - Adaptive thresholding
    - Deskewing (if rotation > 0.5°)
 3. Run Tesseract with language ``heb+eng`` and PSM modes 6, 4, and 11.
-4. Score each result with a heuristic function and return the best one.
+4. Run an extra numeric-only OCR pass for better fine-number recovery.
+5. Score each result with a heuristic function and return the best one.
 """
 import logging
 import os
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 TESSERACT_LANG = "heb+eng"
 TESSERACT_PSM_MODES = [6, 4, 11]
+TESSERACT_NUMERIC_PSM_MODES = [7, 6, 11]
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
 
 
@@ -69,6 +71,23 @@ def preprocess_image(image: np.ndarray) -> np.ndarray:
     deskewed = _deskew(binary)
 
     return deskewed
+
+
+def preprocess_numeric_image(image: np.ndarray) -> np.ndarray:
+    """Preprocess image for numeric OCR (fine number recovery)."""
+    if image.ndim == 3:
+        grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        grey = image.copy()
+
+    upscaled = cv2.resize(grey, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(upscaled)
+    denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
+    binary = cv2.adaptiveThreshold(
+        denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 19, 6
+    )
+    return _deskew(binary)
 
 
 # ---------------------------------------------------------------------------
@@ -131,32 +150,69 @@ def _run_tesseract_on_file(image_path: str) -> str:
     return best_text.strip()
 
 
+def _run_tesseract_numeric_on_file(image_path: str) -> str:
+    """Run numeric-focused Tesseract pass (digits and separators only)."""
+    results: List[Tuple[int, str]] = []
+    config_suffix = "-c tessedit_char_whitelist=0123456789/.-: "
+    for psm in TESSERACT_NUMERIC_PSM_MODES:
+        config = f"--psm {psm} --oem 3 {config_suffix}"
+        try:
+            text = pytesseract.image_to_string(image_path, lang="eng", config=config)
+            digit_count = sum(1 for ch in text if ch.isdigit())
+            results.append((digit_count, text))
+            logger.debug("Numeric OCR PSM %d → digits=%d, chars=%d", psm, digit_count, len(text))
+        except Exception as exc:
+            logger.warning("Numeric OCR PSM %d failed: %s", psm, exc)
+
+    if not results:
+        return ""
+    _, best_text = max(results, key=lambda x: x[0])
+    return best_text.strip()
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def ocr_image(image_path: str) -> str:
     """OCR a raster image file (JPG / PNG)."""
+    text, _ = ocr_image_with_numeric(image_path)
+    return text
+
+
+def ocr_image_with_numeric(image_path: str) -> Tuple[str, str]:
+    """OCR a raster image and return (general_text, numeric_text)."""
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Cannot load image: {image_path}")
 
     preprocessed = preprocess_image(img)
+    numeric_preprocessed = preprocess_numeric_image(img)
 
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        tmp_path = tmp.name
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_general:
+        general_path = tmp_general.name
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_numeric:
+        numeric_path = tmp_numeric.name
     try:
-        cv2.imwrite(tmp_path, preprocessed)
-        return _run_tesseract_on_file(tmp_path)
+        cv2.imwrite(general_path, preprocessed)
+        cv2.imwrite(numeric_path, numeric_preprocessed)
+        return _run_tesseract_on_file(general_path), _run_tesseract_numeric_on_file(numeric_path)
     finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        for path in (general_path, numeric_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 def ocr_pdf(pdf_path: str) -> str:
     """Convert the first page of a PDF to PNG and OCR it."""
+    text, _ = ocr_pdf_with_numeric(pdf_path)
+    return text
+
+
+def ocr_pdf_with_numeric(pdf_path: str) -> Tuple[str, str]:
+    """Convert first PDF page to PNG and return (general_text, numeric_text)."""
     from pdf2image import convert_from_path  # imported here to keep startup light
 
     pages = convert_from_path(pdf_path, first_page=1, last_page=1, dpi=300)
@@ -167,7 +223,7 @@ def ocr_pdf(pdf_path: str) -> str:
         tmp_path = tmp.name
     try:
         pages[0].save(tmp_path, "PNG")
-        return ocr_image(tmp_path)
+        return ocr_image_with_numeric(tmp_path)
     finally:
         try:
             os.unlink(tmp_path)
@@ -182,4 +238,14 @@ def extract_text(file_path: str) -> str:
         return ocr_pdf(file_path)
     if ext in {".jpg", ".jpeg", ".png"}:
         return ocr_image(file_path)
+    raise ValueError(f"Unsupported file extension for OCR: {ext}")
+
+
+def extract_text_with_numeric(file_path: str) -> Tuple[str, str]:
+    """Dispatch OCR and return (general_text, numeric_text)."""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".pdf":
+        return ocr_pdf_with_numeric(file_path)
+    if ext in {".jpg", ".jpeg", ".png"}:
+        return ocr_image_with_numeric(file_path)
     raise ValueError(f"Unsupported file extension for OCR: {ext}")

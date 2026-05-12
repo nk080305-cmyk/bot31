@@ -29,6 +29,7 @@ from aiogram.types import (
 )
 
 from bot.db import add_audit_log, get_latest_case, get_or_create_user, update_case_details
+from bot.fine_number import is_valid_fine_number, normalize_fine_number
 from bot.formatters import FIELD_KEYS, field_label, format_fine_details
 from bot.i18n import t
 from bot.keyboards import confirmation_keyboard
@@ -111,6 +112,9 @@ def _validate_field(field: str, value: str, lang: str) -> Optional[str]:
     value = value.strip()
     if not value:
         return t("edit_empty_value", lang)
+    if field == "fine_number":
+        if not is_valid_fine_number(value):
+            return t("edit_invalid_fine_number", lang)
     if field in ("fine_date", "payment_deadline"):
         if not re.match(r"^\d{1,2}[/\.]\d{1,2}[/\.]\d{4}$", value):
             return t("edit_invalid_date", lang)
@@ -216,6 +220,8 @@ async def handle_field_value(message: Message, state: FSMContext) -> None:
         return
 
     value = (message.text or "").strip()
+    if field == "fine_number":
+        value = normalize_fine_number(value)
 
     error = _validate_field(field, value, lang)
     if error:
