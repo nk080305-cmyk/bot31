@@ -10,8 +10,8 @@ Supports **Russian 🇷🇺 / Hebrew 🇮🇱 / English 🇬🇧** UI; appeal le
 | Capability | Details |
 |---|---|
 | **Multi-user** | Each user has an independent session |
-| **File upload** | JPG, PNG, PDF – max 15 MB |
-| **OCR** | Tesseract (heb+eng) with OpenCV preprocessing; PSM 6/4/11 with best-result heuristics |
+| **File upload** | JPG, PNG, PDF – max 15 MB (for best OCR accuracy, send as Telegram document/file) |
+| **OCR** | Tesseract (heb+eng) with OpenCV preprocessing + numeric-focused OCR fallback for fine numbers |
 | **AI extraction** | OpenAI GPT-4o extracts structured fields with per-field confidence scores |
 | **Data correction** | After extraction, ✅/❌ inline buttons let users confirm or fix any field (fine number, violation text, date, amount, licence plate, location, deadline) before generating the appeal |
 | **Appeal reason selection** | After confirming data, choose from 5 localised reasons (sign not visible, data error, force majeure, permit, or free text); reason is embedded in the Hebrew letter |

@@ -19,12 +19,15 @@ class TestValidateField:
     def test_whitespace_only_rejected(self):
         assert _validate_field("fine_number", "   ", "en") is not None
 
-    # fine_number accepts any non-empty string (can contain letters/digits)
+    # fine_number: digits-only after normalization, 6-12 digits
     def test_fine_number_valid(self):
         assert _validate_field("fine_number", "51903219", "en") is None
 
-    def test_fine_number_alphanumeric(self):
-        assert _validate_field("fine_number", "AB1234", "en") is None
+    def test_fine_number_with_separators_valid(self):
+        assert _validate_field("fine_number", "51-9032 19", "en") is None
+
+    def test_fine_number_alphanumeric_invalid(self):
+        assert _validate_field("fine_number", "AB1234", "en") is not None
 
     # date fields
     @pytest.mark.parametrize("val", ["3/4/2023", "03/04/2023", "3.4.2023", "03.04.2023"])

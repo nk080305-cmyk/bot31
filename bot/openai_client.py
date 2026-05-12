@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 from openai import AsyncOpenAI
 
 from bot.config import OPENAI_API_KEY, OPENAI_MODEL
+from bot.fine_number import normalize_fine_number
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,37 @@ Fields:
 OCR TEXT:
 \"\"\"
 {ocr_text}
+\"\"\"
+
+Important rules:
+- fine_number must be digits only (remove spaces, dashes, punctuation).
+- If fine_number is uncertain, still return your best guess with lower confidence.
+- Return ALL listed fields, even when value is null.
+
+Respond ONLY with valid JSON. No explanation, no markdown fences."""
+
+_FINE_NUMBER_ONLY_PROMPT = """\
+Extract ONLY the fine/ticket number (מספר דוח) from OCR text.
+
+Return JSON object with exactly:
+{
+  "fine_number": string or null,
+  "confidence": number between 0.0 and 1.0
+}
+
+Rules:
+- fine_number should contain digits only.
+- Use both OCR blocks if provided.
+- If not found, return {"fine_number": null, "confidence": 0.0}.
+
+GENERAL OCR:
+\"\"\"
+{ocr_text}
+\"\"\"
+
+NUMERIC OCR:
+\"\"\"
+{numeric_ocr_text}
 \"\"\"
 
 Respond ONLY with valid JSON. No explanation, no markdown fences."""
@@ -100,11 +132,57 @@ async def extract_fine_details(ocr_text: str) -> Dict[str, Any]:
             max_tokens=800,
         )
         result: Dict[str, Any] = json.loads(response.choices[0].message.content)
+        fine_number_data = result.get("fine_number")
+        if isinstance(fine_number_data, dict):
+            value = fine_number_data.get("value")
+            if value:
+                fine_number_data["value"] = normalize_fine_number(str(value), aggressive=True)
         logger.info("Fine details extracted (fields=%d)", len(result))
         return result
     except Exception as exc:
         logger.error("extract_fine_details failed: %s", exc)
         raise
+
+
+async def extract_fine_number_only(ocr_text: str, numeric_ocr_text: str = "") -> Dict[str, Any]:
+    """Extract only the fine number from OCR text blocks.
+
+    Parameters
+    ----------
+    ocr_text:
+        General OCR text (heb+eng pass).
+    numeric_ocr_text:
+        Optional numeric-focused OCR text for difficult scans.
+
+    Returns
+    -------
+    dict
+        ``{"fine_number": str | None, "confidence": float}``.
+    """
+    prompt = _FINE_NUMBER_ONLY_PROMPT.format(
+        ocr_text=ocr_text[:5000],
+        numeric_ocr_text=numeric_ocr_text[:3000],
+    )
+    try:
+        response = await _client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": _EXTRACTION_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=200,
+        )
+        result: Dict[str, Any] = json.loads(response.choices[0].message.content)
+        normalized = normalize_fine_number(str(result.get("fine_number") or ""), aggressive=True)
+        confidence = result.get("confidence", 0.0)
+        if not isinstance(confidence, (float, int)):
+            confidence = 0.0
+        return {"fine_number": normalized or None, "confidence": float(confidence)}
+    except Exception as exc:
+        logger.error("extract_fine_number_only failed: %s", exc)
+        return {"fine_number": None, "confidence": 0.0}
 
 
 async def generate_appeal(
