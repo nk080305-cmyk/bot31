@@ -146,7 +146,7 @@ async def _process_file(
 
         # --- OpenAI extraction ---
         try:
-            details = await ai_extract_fine_details(ocr_text)
+            details = await ai_extract_fine_details(ocr_text, numeric_ocr_text)
             details = await _ensure_fine_number(details, ocr_text, numeric_ocr_text)
         except Exception as exc:
             logger.error("Extraction failed for user_id=%s: %s", message.from_user.id, exc)
