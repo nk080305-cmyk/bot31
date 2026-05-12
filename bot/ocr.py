@@ -181,7 +181,15 @@ def ocr_image(image_path: str) -> str:
 
 
 def ocr_image_with_numeric(image_path: str) -> Tuple[str, str]:
-    """OCR a raster image and return (general_text, numeric_text)."""
+    """OCR a raster image and return ``(general_text, numeric_text)``.
+
+    ``general_text`` is produced from the standard heb+eng OCR pipeline.
+    ``numeric_text`` is produced from a numeric-focused OCR pass for better
+    fine-number recovery.
+
+    Returns:
+        Tuple[str, str]: ``(general_text, numeric_text)``.
+    """
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Cannot load image: {image_path}")
@@ -212,7 +220,11 @@ def ocr_pdf(pdf_path: str) -> str:
 
 
 def ocr_pdf_with_numeric(pdf_path: str) -> Tuple[str, str]:
-    """Convert first PDF page to PNG and return (general_text, numeric_text)."""
+    """OCR the first PDF page and return ``(general_text, numeric_text)``.
+
+    The PDF page is converted to PNG and then processed by both the standard
+    OCR pipeline and a numeric-focused OCR pipeline.
+    """
     from pdf2image import convert_from_path  # imported here to keep startup light
 
     pages = convert_from_path(pdf_path, first_page=1, last_page=1, dpi=300)

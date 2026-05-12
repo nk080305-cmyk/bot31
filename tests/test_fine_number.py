@@ -41,7 +41,7 @@ def test_ensure_fine_number_uses_focused_fallback():
     updated = asyncio.run(
         _ensure_fine_number(
             details,
-            "номер штрафа: ???",
+            "ticket number: ???",
             "",
             focused_extractor=fake_extractor,
         )

@@ -4,8 +4,12 @@ import unicodedata
 from collections import Counter
 from typing import Iterable, List
 
+_MIN_FINE_NUMBER_LEN = 6
+_MAX_FINE_NUMBER_LEN = 12
 _SEPARATORS_RE = re.compile(r"[ \t\-./:,_]+")
-_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\d[ \t\-./:,_]?){5,13}\d(?!\d)")
+_CANDIDATE_RE = re.compile(
+    rf"(?<!\d)(?:\d[ \t\-./:,_]?){{{_MIN_FINE_NUMBER_LEN - 1},{_MAX_FINE_NUMBER_LEN - 1}}}\d(?!\d)"
+)
 _KEYWORD_RE = re.compile(
     r"(מס(?:פר)?\s*דוח|номер\s*штрафа|fine\s*(?:number|no|#)|ticket\s*(?:number|no|#))",
     re.IGNORECASE,
@@ -50,7 +54,9 @@ def normalize_fine_number(value: str | None, *, aggressive: bool = False) -> str
     return "".join(digits)
 
 
-def is_valid_fine_number(value: str | None, *, min_len: int = 6, max_len: int = 12) -> bool:
+def is_valid_fine_number(
+    value: str | None, *, min_len: int = _MIN_FINE_NUMBER_LEN, max_len: int = _MAX_FINE_NUMBER_LEN
+) -> bool:
     """Validate that the fine number is digits-only after normalization."""
     if not value:
         return False
@@ -78,7 +84,7 @@ def find_fine_number_candidates(text: str) -> List[str]:
     normalized: List[str] = []
     for candidate in raw_candidates:
         value = normalize_fine_number(candidate, aggressive=True)
-        if 6 <= len(value) <= 12:
+        if _MIN_FINE_NUMBER_LEN <= len(value) <= _MAX_FINE_NUMBER_LEN:
             normalized.append(value)
     return normalized
 

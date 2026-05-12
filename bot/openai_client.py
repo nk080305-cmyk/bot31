@@ -145,7 +145,20 @@ async def extract_fine_details(ocr_text: str) -> Dict[str, Any]:
 
 
 async def extract_fine_number_only(ocr_text: str, numeric_ocr_text: str = "") -> Dict[str, Any]:
-    """Extract only the fine number from OCR text blocks."""
+    """Extract only the fine number from OCR text blocks.
+
+    Parameters
+    ----------
+    ocr_text:
+        General OCR text (heb+eng pass).
+    numeric_ocr_text:
+        Optional numeric-focused OCR text for difficult scans.
+
+    Returns
+    -------
+    dict
+        ``{"fine_number": str | None, "confidence": float}``.
+    """
     prompt = _FINE_NUMBER_ONLY_PROMPT.format(
         ocr_text=ocr_text[:5000],
         numeric_ocr_text=numeric_ocr_text[:3000],

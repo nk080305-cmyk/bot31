@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 _ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
+_PHOTO_TIP_SHOWN_USERS: set[int] = set()
 
 
 async def _ensure_fine_number(
@@ -48,7 +49,16 @@ async def _ensure_fine_number(
     numeric_ocr_text: str,
     focused_extractor: Callable[[str, str], Any] = ai_extract_fine_number_only,
 ) -> Dict[str, Any]:
-    """Normalize and recover fine_number using OCR heuristics + focused extraction."""
+    """Normalize/recover ``fine_number`` with staged fallbacks.
+
+    Strategy:
+    1) normalize and validate model output;
+    2) try regex/keyword heuristics from both OCR texts;
+    3) if still weak/invalid, call a focused LLM extractor for fine_number only;
+    4) keep a low-confidence placeholder when no valid candidate is found.
+
+    Returns the updated ``details`` dictionary with a ``fine_number`` field.
+    """
     if not isinstance(details, dict):
         details = {}
 
@@ -96,10 +106,19 @@ async def _ensure_fine_number(
 # ---------------------------------------------------------------------------
 
 async def _process_file(
-    message: Message, state: FSMContext, file_id: str, file_name: str, file_size: int
+    message: Message,
+    state: FSMContext,
+    file_id: str,
+    file_name: str,
+    file_size: int,
+    *,
+    show_photo_tip: bool = False,
 ) -> None:
     user = await get_or_create_user(message.from_user.id)
     lang = user.get("language", "ru")
+
+    if show_photo_tip:
+        await message.answer(t("upload_photo_tip", lang))
 
     # --- size check ---
     if file_size > MAX_FILE_SIZE:
@@ -206,11 +225,13 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
     file_name = f"{photo.file_unique_id}.jpg"
     file_size = photo.file_size or 0
     logger.info("Photo received: user_id=%s size=%d", message.from_user.id, file_size)
-    user = await get_or_create_user(message.from_user.id)
-    lang = user.get("language", "ru")
-    await message.answer(t("upload_photo_tip", lang))
+    show_tip = message.from_user.id not in _PHOTO_TIP_SHOWN_USERS
+    if show_tip:
+        _PHOTO_TIP_SHOWN_USERS.add(message.from_user.id)
     await state.clear()  # reset any ongoing edit session
-    await _process_file(message, state, photo.file_id, file_name, file_size)
+    await _process_file(
+        message, state, photo.file_id, file_name, file_size, show_photo_tip=show_tip
+    )
 
 
 @router.message(F.document)
