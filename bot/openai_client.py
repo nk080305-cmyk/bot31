@@ -8,16 +8,95 @@ Two operations are exposed:
 """
 import json
 import logging
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
 from bot.config import OPENAI_API_KEY, OPENAI_MODEL
-from bot.fine_number import normalize_fine_number
+from bot.fine_number import (
+    find_fine_number_candidates,
+    normalize_fine_number,
+    pick_best_fine_number,
+)
 
 logger = logging.getLogger(__name__)
 
 _client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+# ---------------------------------------------------------------------------
+# Private helpers for post-validation heuristics
+# ---------------------------------------------------------------------------
+
+_HEURISTIC_PLATE_CONFIDENCE = 0.65  # cap for OCR-heuristic plate guesses
+_HEURISTIC_FINE_CONFIDENCE = 0.70   # cap for OCR-heuristic fine-number guesses
+
+_PLATE_KEYWORDS = ["מספר רכב", "לוחית", "לוחית רישוי", "רכב", "vehicle", "plate"]
+_FN_KEYWORDS = ["מספר דוח", "מס' דוח", "מס דוח", "דוח", "fine", "ticket"]
+# Fine-number length → sort priority (prefer 8-digit, then 9, 10, 7; others last)
+_FINE_LEN_RANK = {8: 5, 9: 4, 10: 3, 7: 2}
+
+
+def _digits_only(text: str) -> str:
+    """Strip every non-digit character from *text*."""
+    return re.sub(r"\D", "", text)
+
+
+def _context_digits_near_keywords(
+    text: str,
+    keywords: List[str],
+    min_len: int,
+    max_len: int,
+    window: int = 260,
+) -> List[str]:
+    """Return unique digit strings of length [min_len, max_len] found near any keyword.
+
+    Searches a sliding window around each keyword occurrence so that numeric
+    sequences that appear in the same sentence or line as the keyword are
+    preferred over random numbers elsewhere in the document.
+    """
+    if not text:
+        return []
+    # The pattern anchors on a leading and trailing digit (accounting for the
+    # two mandatory digit anchors, the repetition range is [min_len-2, max_len-2]).
+    _pat = re.compile(
+        r"\d[\d \t\-./,:_]{%d,%d}\d" % (min_len - 2, max_len - 2)
+    )
+    seen: dict = {}
+    for kw in keywords:
+        for m in re.finditer(re.escape(kw), text, re.IGNORECASE | re.UNICODE):
+            start = max(0, m.start() - window // 2)
+            end = min(len(text), m.end() + window // 2)
+            snippet = text[start:end]
+            for dm in _pat.finditer(snippet):
+                val = _digits_only(dm.group())
+                if min_len <= len(val) <= max_len and val not in seen:
+                    seen[val] = None
+    return list(seen)
+
+
+def _best_plate_candidate(numeric_ocr_text: str) -> Optional[str]:
+    """Return the first 6-8 digit string from *numeric_ocr_text* as a plate guess."""
+    if not numeric_ocr_text:
+        return None
+    for m in re.finditer(r"\d{6,8}", numeric_ocr_text):
+        return m.group()
+    return None
+
+
+def _best_fine_candidate(
+    numeric_ocr_text: str, plate: Optional[str] = None
+) -> Optional[str]:
+    """Return the best fine-number candidate from *numeric_ocr_text*.
+
+    Uses the existing keyword-aware :func:`~bot.fine_number.find_fine_number_candidates`
+    helper; the plate number is excluded to avoid confusing it with the fine number.
+    """
+    candidates = find_fine_number_candidates(numeric_ocr_text)
+    if plate:
+        candidates = [c for c in candidates if c != plate]
+    return pick_best_fine_number(candidates) or None
+
 
 # ---------------------------------------------------------------------------
 # Extraction
@@ -108,8 +187,18 @@ _APPEAL_PROMPT = """\
 כתוב את מכתב הערר בלבד, ללא הסברים נוספים."""
 
 
-async def extract_fine_details(ocr_text: str) -> Dict[str, Any]:
+async def extract_fine_details(
+    ocr_text: str, numeric_ocr_text: str = ""
+) -> Dict[str, Any]:
     """Call OpenAI to extract structured fine fields from *ocr_text*.
+
+    Parameters
+    ----------
+    ocr_text:
+        General OCR text (Hebrew + English Tesseract pass).
+    numeric_ocr_text:
+        Optional numeric-focused OCR text used for post-extraction heuristics
+        when the model output is missing or implausible.
 
     Returns a dict such as::
 
@@ -137,6 +226,75 @@ async def extract_fine_details(ocr_text: str) -> Dict[str, Any]:
             value = fine_number_data.get("value")
             if value:
                 fine_number_data["value"] = normalize_fine_number(str(value), aggressive=True)
+
+        # --- Post-validation: heuristic fallbacks for vehicle_plate / fine_number ---
+        try:
+            plate_data = result.get("vehicle_plate")
+            plate_val2: Optional[str] = (
+                _digits_only(str(plate_data.get("value") or ""))
+                if isinstance(plate_data, dict)
+                else ""
+            ) or None
+
+            # Context-aware candidates from the general OCR text
+            ctx_plate_cands = _context_digits_near_keywords(
+                ocr_text, _PLATE_KEYWORDS, 5, 8, window=200
+            )
+            ctx_plate_best: Optional[str] = ctx_plate_cands[0] if ctx_plate_cands else None
+
+            ctx_fine_cands = _context_digits_near_keywords(
+                ocr_text, _FN_KEYWORDS, 7, 13, window=260
+            )
+            if ctx_fine_cands:
+                ctx_fine_cands.sort(
+                    key=lambda s: (_FINE_LEN_RANK.get(len(s), 1), len(s)),
+                    reverse=True,
+                )
+            ctx_fine_best: Optional[str] = ctx_fine_cands[0] if ctx_fine_cands else None
+
+            # Fix plate if invalid length
+            if not plate_val2 or not (6 <= len(plate_val2) <= 8):
+                best_plate = ctx_plate_best or _best_plate_candidate(numeric_ocr_text)
+                if best_plate:
+                    old_conf = (
+                        (result.get("vehicle_plate") or {}).get(
+                            "confidence", _HEURISTIC_PLATE_CONFIDENCE
+                        )
+                        if isinstance(result.get("vehicle_plate"), dict)
+                        else _HEURISTIC_PLATE_CONFIDENCE
+                    )
+                    result["vehicle_plate"] = {
+                        "value": best_plate,
+                        "confidence": float(min(_HEURISTIC_PLATE_CONFIDENCE, old_conf)),
+                    }
+                    plate_val2 = best_plate
+
+            # Fix fine_number if too short / clearly wrong
+            if isinstance(result.get("fine_number"), dict):
+                fn_val = _digits_only(str(result["fine_number"].get("value") or ""))
+                if fn_val:
+                    result["fine_number"]["value"] = fn_val
+
+                # Reuse fn_val – it already reflects the (possibly updated) value above
+                fn_val2: Optional[str] = fn_val or None
+                if (
+                    (not fn_val2)
+                    or (len(fn_val2) < 7)
+                    or (plate_val2 and fn_val2 == plate_val2)
+                    or (plate_val2 and len(fn_val2) <= len(plate_val2))
+                ):
+                    best_fn = ctx_fine_best or _best_fine_candidate(
+                        numeric_ocr_text, plate=plate_val2
+                    )
+                    if best_fn:
+                        result["fine_number"]["value"] = best_fn
+                        old_c = result["fine_number"].get("confidence", 0.5)
+                        result["fine_number"]["confidence"] = float(
+                            min(old_c, _HEURISTIC_FINE_CONFIDENCE)
+                        )
+        except Exception as _post_exc:
+            logger.warning("Post-validation heuristics failed: %s", _post_exc)
+
         logger.info("Fine details extracted (fields=%d)", len(result))
         return result
     except Exception as exc:
