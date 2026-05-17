@@ -14,8 +14,10 @@ Steps
 """
 import logging
 import os
+import re
 import tempfile
-from typing import List, Tuple
+from collections import Counter
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -27,6 +29,15 @@ TESSERACT_LANG = "heb+eng"
 TESSERACT_PSM_MODES = [6, 4, 11]
 TESSERACT_NUMERIC_PSM_MODES = [7, 6, 11]
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
+OCR_MULTI_PREPROCESS = os.getenv("OCR_MULTI_PREPROCESS", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+PLATE_KEYWORDS = ["רכב", "מספר רכב"]
+FINE_KEYWORDS = ["דוח", "מספר דוח", "קנס"]
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +82,21 @@ def preprocess_image(image: np.ndarray) -> np.ndarray:
     deskewed = _deskew(binary)
 
     return deskewed
+
+
+def preprocess_variants(image: np.ndarray) -> List[np.ndarray]:
+    """Return OCR preprocess variants: equalized gray + 2 binary variants."""
+    if image.ndim == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+    gray = cv2.equalizeHist(gray)
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    thresh_global = cv2.threshold(blur, 140, 255, cv2.THRESH_BINARY)[1]
+    thresh_adaptive = cv2.adaptiveThreshold(
+        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+    )
+    return [gray, thresh_global, thresh_adaptive]
 
 
 def preprocess_numeric_image(image: np.ndarray) -> np.ndarray:
@@ -150,6 +176,28 @@ def _run_tesseract_on_file(image_path: str) -> str:
     return best_text.strip()
 
 
+def _run_tesseract_on_variants(images: List[np.ndarray]) -> str:
+    """Run scored OCR over image variants × PSM modes and return best text."""
+    results: List[Tuple[float, str]] = []
+    for idx, image in enumerate(images):
+        for psm in TESSERACT_PSM_MODES:
+            config = f"--psm {psm} --oem 3"
+            try:
+                text = pytesseract.image_to_string(image, lang=TESSERACT_LANG, config=config)
+                sc = score_ocr_result(text)
+                results.append((sc, text))
+                logger.debug(
+                    "Variant %d PSM %d → score=%.2f, chars=%d", idx, psm, sc, len(text)
+                )
+            except Exception as exc:
+                logger.warning("Tesseract variant %d PSM %d failed: %s", idx, psm, exc)
+    if not results:
+        return ""
+    best_score, best_text = max(results, key=lambda x: x[0])
+    logger.info("OCR best score=%.2f from %d variant×PSM configs", best_score, len(results))
+    return best_text.strip()
+
+
 def _run_tesseract_numeric_on_file(image_path: str) -> str:
     """Run numeric-focused Tesseract pass (digits and separators only)."""
     results: List[Tuple[int, str]] = []
@@ -168,6 +216,125 @@ def _run_tesseract_numeric_on_file(image_path: str) -> str:
         return ""
     _, best_text = max(results, key=lambda x: x[0])
     return best_text.strip()
+
+
+def _run_tesseract_numeric_on_variants(images: List[np.ndarray]) -> str:
+    """Run numeric OCR over image variants × numeric PSM modes and return best text."""
+    results: List[Tuple[int, str]] = []
+    config_suffix = "-c tessedit_char_whitelist=0123456789"
+    for idx, image in enumerate(images):
+        for psm in TESSERACT_NUMERIC_PSM_MODES:
+            config = f"--psm {psm} --oem 3 {config_suffix}"
+            try:
+                text = pytesseract.image_to_string(image, lang="eng", config=config)
+                digit_count = sum(1 for ch in text if ch.isdigit())
+                results.append((digit_count, text))
+                logger.debug(
+                    "Numeric variant %d PSM %d → digits=%d, chars=%d",
+                    idx,
+                    psm,
+                    digit_count,
+                    len(text),
+                )
+            except Exception as exc:
+                logger.warning("Numeric OCR variant %d PSM %d failed: %s", idx, psm, exc)
+    if not results:
+        return ""
+    _, best_text = max(results, key=lambda x: x[0])
+    return best_text.strip()
+
+
+def run_ocr_multi(image: np.ndarray) -> Tuple[str, str]:
+    """Run fixed PSM6 OCR over preprocess variants and join outputs."""
+    texts: List[str] = []
+    nums: List[str] = []
+    for variant in preprocess_variants(image):
+        texts.append(
+            pytesseract.image_to_string(variant, lang="heb+eng", config="--oem 3 --psm 6")
+        )
+        nums.append(
+            pytesseract.image_to_string(
+                variant,
+                lang="eng",
+                config="--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789",
+            )
+        )
+    return "\n".join(t.strip() for t in texts if t.strip()), "\n".join(
+        n.strip() for n in nums if n.strip()
+    )
+
+
+def _context_score(text: str, number: str, keywords: List[str], window: int = 150) -> int:
+    score = 0
+    if not number:
+        return score
+    for keyword in keywords:
+        for match in re.finditer(re.escape(keyword), text):
+            start = max(0, match.start() - window)
+            end = min(len(text), match.end() + window)
+            if number in text[start:end]:
+                score += 2
+    return score
+
+
+def _candidate_score(
+    candidate: str, counts: Counter, kind: str, text: str
+) -> Tuple[int, bool, int, int]:
+    if kind == "plate":
+        return (
+            counts[candidate],
+            len(candidate) in (7, 8),
+            _context_score(text, candidate, PLATE_KEYWORDS),
+            -abs(len(candidate) - 8),
+        )
+    return (
+        counts[candidate],
+        len(candidate) in (8, 9),
+        _context_score(text, candidate, FINE_KEYWORDS),
+        -abs(len(candidate) - 8),
+    )
+
+
+def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[str, Any]:
+    """Extract plate/fine heuristics from OCR text blocks."""
+    full_text = f"{ocr_text}\n{numeric_text}"
+    raw = re.findall(r"\d[\d\s\-./,:]{4,16}\d", full_text)
+    cleaned = ["".join(ch for ch in token if ch.isdigit()) for token in raw]
+    cleaned = [n for n in cleaned if 6 <= len(n) <= 12 and len(set(n)) > 2]
+    if not cleaned:
+        return {
+            "plate": None,
+            "fine": None,
+            "plate_confident": False,
+            "fine_confident": False,
+        }
+
+    counts: Counter = Counter(cleaned)
+    plate_candidates = [n for n in cleaned if len(n) in (7, 8)]
+    best_plate = (
+        max(plate_candidates, key=lambda n: _candidate_score(n, counts, "plate", ocr_text))
+        if plate_candidates
+        else None
+    )
+
+    fine_candidates = [n for n in cleaned if 7 <= len(n) <= 10 and n != best_plate]
+    best_fine = (
+        max(fine_candidates, key=lambda n: _candidate_score(n, counts, "fine", ocr_text))
+        if fine_candidates
+        else None
+    )
+
+    plate_ctx = _context_score(ocr_text, best_plate or "", PLATE_KEYWORDS) if best_plate else 0
+    fine_ctx = _context_score(ocr_text, best_fine or "", FINE_KEYWORDS) if best_fine else 0
+    plate_confident = bool(best_plate and counts[best_plate] >= 2 and plate_ctx >= 2)
+    fine_confident = bool(best_fine and counts[best_fine] >= 2 and fine_ctx >= 2)
+
+    return {
+        "plate": best_plate,
+        "fine": best_fine,
+        "plate_confident": plate_confident,
+        "fine_confident": fine_confident,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +363,15 @@ def ocr_image_with_numeric(image_path: str) -> Tuple[str, str]:
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Cannot load image: {image_path}")
+
+    if OCR_MULTI_PREPROCESS:
+        variants = preprocess_variants(img)
+        best_general = _run_tesseract_on_variants(variants)
+        best_numeric = _run_tesseract_numeric_on_variants(variants)
+        multi_general, multi_numeric = run_ocr_multi(img)
+        general_text = "\n".join(part for part in (best_general, multi_general) if part).strip()
+        numeric_text = "\n".join(part for part in (best_numeric, multi_numeric) if part).strip()
+        return general_text, numeric_text
 
     preprocessed = preprocess_image(img)
     numeric_preprocessed = preprocess_numeric_image(img)
