@@ -6,6 +6,7 @@ from bot.fine_number import (
     normalize_fine_number,
     pick_best_fine_number,
 )
+from bot.handlers.upload import _apply_heuristic_candidates
 from bot.handlers.upload import _ensure_fine_number
 
 
@@ -65,3 +66,19 @@ def test_ensure_fine_number_uses_heuristic_candidate():
     )
     assert updated["fine_number"]["value"] == "81234567"
     assert updated["fine_number"]["confidence"] >= 0.55
+
+
+def test_apply_heuristic_candidates_sets_weak_fields():
+    details = {
+        "vehicle_plate": {"value": "", "confidence": 0.2},
+        "fine_number": {"value": "", "confidence": 0.2},
+    }
+    candidates = {
+        "plate": "12345678",
+        "fine": "51903219",
+        "plate_confident": True,
+        "fine_confident": True,
+    }
+    updated = _apply_heuristic_candidates(details, candidates)
+    assert updated["vehicle_plate"]["value"] == "12345678"
+    assert updated["fine_number"]["value"] == "51903219"

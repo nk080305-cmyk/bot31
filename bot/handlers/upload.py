@@ -32,7 +32,7 @@ from bot.fine_number import (
 )
 from bot.i18n import t
 from bot.keyboards import confirmation_keyboard
-from bot.ocr import extract_text_with_numeric
+from bot.ocr import extract_plate_and_fine_candidates, extract_text_with_numeric
 from bot.openai_client import extract_fine_details as ai_extract_fine_details
 from bot.openai_client import extract_fine_number_only as ai_extract_fine_number_only
 
@@ -100,6 +100,37 @@ async def _ensure_fine_number(
     return details
 
 
+def _apply_heuristic_candidates(details: Dict[str, Any], candidates: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply OCR heuristics to plate/fine fields when model output is weak."""
+    if not isinstance(details, dict):
+        details = {}
+
+    if candidates.get("plate"):
+        plate_field = details.get("vehicle_plate")
+        if not isinstance(plate_field, dict):
+            plate_field = {}
+            details["vehicle_plate"] = plate_field
+        plate_value = "".join(ch for ch in str(plate_field.get("value") or "") if ch.isdigit())
+        plate_conf = plate_field.get("confidence", 0.0)
+        plate_conf = float(plate_conf) if isinstance(plate_conf, (float, int)) else 0.0
+        if candidates.get("plate_confident") and (not plate_value or plate_conf < 0.65):
+            plate_field["value"] = candidates["plate"]
+            plate_field["confidence"] = max(plate_conf, 0.65)
+
+    if candidates.get("fine"):
+        fine_field = details.get("fine_number")
+        if not isinstance(fine_field, dict):
+            fine_field = {}
+            details["fine_number"] = fine_field
+        fine_value = normalize_fine_number(str(fine_field.get("value") or ""), aggressive=True)
+        fine_conf = fine_field.get("confidence", 0.0)
+        fine_conf = float(fine_conf) if isinstance(fine_conf, (float, int)) else 0.0
+        if candidates.get("fine_confident") and (not is_valid_fine_number(fine_value) or fine_conf < 0.7):
+            fine_field["value"] = candidates["fine"]
+            fine_field["confidence"] = max(fine_conf, 0.7)
+    return details
+
+
 # ---------------------------------------------------------------------------
 # Core processing function
 # ---------------------------------------------------------------------------
@@ -144,14 +175,35 @@ async def _process_file(
 
         await message.answer(t("ocr_done", lang))
 
+        heuristic_candidates = extract_plate_and_fine_candidates(ocr_text, numeric_ocr_text)
+
         # --- OpenAI extraction ---
         try:
             details = await ai_extract_fine_details(ocr_text, numeric_ocr_text)
+            details = _apply_heuristic_candidates(details, heuristic_candidates)
             details = await _ensure_fine_number(details, ocr_text, numeric_ocr_text)
         except Exception as exc:
-            logger.error("Extraction failed for user_id=%s: %s", message.from_user.id, exc)
-            await message.answer(t("extraction_failed", lang))
-            return
+            if heuristic_candidates.get("plate_confident") and heuristic_candidates.get("fine_confident"):
+                logger.warning(
+                    "OpenAI extraction failed for user_id=%s; using confident OCR heuristics: %s",
+                    message.from_user.id,
+                    exc,
+                )
+                details = {
+                    "vehicle_plate": {
+                        "value": heuristic_candidates["plate"],
+                        "confidence": 0.65,
+                    },
+                    "fine_number": {
+                        "value": heuristic_candidates["fine"],
+                        "confidence": 0.7,
+                    },
+                }
+                details = await _ensure_fine_number(details, ocr_text, numeric_ocr_text)
+            else:
+                logger.error("Extraction failed for user_id=%s: %s", message.from_user.id, exc)
+                await message.answer(t("extraction_failed", lang))
+                return
 
         await message.answer(t("extraction_done", lang))
 

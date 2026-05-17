@@ -48,6 +48,7 @@ docker compose logs -f
 | `OPENAI_MODEL` | | Model to use (default: `gpt-4o`) |
 | `ENCRYPTION_KEY` | | Explicit encryption secret; falls back to bot token derivation |
 | `LOG_LEVEL` | | Python log level (default: `INFO`) |
+| `OCR_MULTI_PREPROCESS` | | Enable improved OCR variants + multi-pass OCR (`1` default, set `0` to disable) |
 
 ---
 
