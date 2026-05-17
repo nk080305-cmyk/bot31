@@ -29,15 +29,22 @@ TESSERACT_LANG = "heb+eng"
 TESSERACT_PSM_MODES = [6, 4, 11]
 TESSERACT_NUMERIC_PSM_MODES = [7, 6, 11]
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
-OCR_MULTI_PREPROCESS = os.getenv("OCR_MULTI_PREPROCESS", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
 
 PLATE_KEYWORDS = ["רכב", "מספר רכב"]
 FINE_KEYWORDS = ["דוח", "מספר דוח", "קנס"]
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _is_multi_preprocess_enabled() -> bool:
+    if os.getenv("OCR_MULTI_VARIANTS") is not None:
+        return _env_flag("OCR_MULTI_VARIANTS", default=False)
+    return _env_flag("OCR_MULTI_PREPROCESS", default=False)
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +184,7 @@ def _run_tesseract_on_file(image_path: str) -> str:
 
 
 def _run_tesseract_on_variants(images: List[np.ndarray]) -> str:
-    """Run scored OCR over image variants × PSM modes and return best text."""
+    """Run scored OCR over image variants * PSM modes and return best text."""
     results: List[Tuple[float, str]] = []
     for idx, image in enumerate(images):
         for psm in TESSERACT_PSM_MODES:
@@ -194,7 +201,7 @@ def _run_tesseract_on_variants(images: List[np.ndarray]) -> str:
     if not results:
         return ""
     best_score, best_text = max(results, key=lambda x: x[0])
-    logger.info("OCR best score=%.2f from %d variant×PSM configs", best_score, len(results))
+    logger.info("OCR best score=%.2f from %d variant*PSM configs", best_score, len(results))
     return best_text.strip()
 
 
@@ -219,7 +226,7 @@ def _run_tesseract_numeric_on_file(image_path: str) -> str:
 
 
 def _run_tesseract_numeric_on_variants(images: List[np.ndarray]) -> str:
-    """Run numeric OCR over image variants × numeric PSM modes and return best text."""
+    """Run numeric OCR over image variants * numeric PSM modes and return best text."""
     results: List[Tuple[int, str]] = []
     config_suffix = "-c tessedit_char_whitelist=0123456789"
     for idx, image in enumerate(images):
@@ -364,7 +371,7 @@ def ocr_image_with_numeric(image_path: str) -> Tuple[str, str]:
     if img is None:
         raise ValueError(f"Cannot load image: {image_path}")
 
-    if OCR_MULTI_PREPROCESS:
+    if _is_multi_preprocess_enabled():
         variants = preprocess_variants(img)
         best_general = _run_tesseract_on_variants(variants)
         best_numeric = _run_tesseract_numeric_on_variants(variants)

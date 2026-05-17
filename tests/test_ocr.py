@@ -1,6 +1,10 @@
 import numpy as np
 
-from bot.ocr import extract_plate_and_fine_candidates, preprocess_variants
+from bot.ocr import (
+    _is_multi_preprocess_enabled,
+    extract_plate_and_fine_candidates,
+    preprocess_variants,
+)
 
 
 def test_preprocess_variants_returns_three_images():
@@ -23,3 +27,15 @@ def test_extract_plate_and_fine_candidates_context_and_frequency():
     assert result["fine"] == "51903219"
     assert result["plate_confident"] is True
     assert result["fine_confident"] is True
+
+
+def test_multi_preprocess_flag_defaults_to_off(monkeypatch):
+    monkeypatch.delenv("OCR_MULTI_VARIANTS", raising=False)
+    monkeypatch.delenv("OCR_MULTI_PREPROCESS", raising=False)
+    assert _is_multi_preprocess_enabled() is False
+
+
+def test_multi_preprocess_flag_can_be_enabled_with_alias(monkeypatch):
+    monkeypatch.setenv("OCR_MULTI_PREPROCESS", "0")
+    monkeypatch.setenv("OCR_MULTI_VARIANTS", "1")
+    assert _is_multi_preprocess_enabled() is True
