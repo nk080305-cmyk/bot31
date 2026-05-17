@@ -47,6 +47,27 @@ def _is_multi_preprocess_enabled() -> bool:
     return _env_flag("OCR_MULTI_PREPROCESS", default=False)
 
 
+def mask_secret(value: str | None, prefix_len: int = 7, suffix_len: int = 4) -> str:
+    """Return a masked version of a secret string safe for logging.
+
+    Shows the first *prefix_len* and last *suffix_len* characters of *value*
+    so the output is recognisable without leaking the full secret.  Strings
+    that are too short to mask safely are replaced with ``[REDACTED]``.
+
+    Examples
+    --------
+    >>> mask_secret("sk-proj-ABCDEF1234WXYZ")
+    'sk-proj...WXYZ'
+    >>> mask_secret("short")
+    '[REDACTED]'
+    """
+    if not value:
+        return "[REDACTED]"
+    if len(value) <= prefix_len + suffix_len:
+        return "[REDACTED]"
+    return f"{value[:prefix_len]}...{value[-suffix_len:]}"
+
+
 # ---------------------------------------------------------------------------
 # Image preprocessing
 # ---------------------------------------------------------------------------
@@ -272,43 +293,100 @@ def run_ocr_multi(image: np.ndarray) -> Tuple[str, str]:
 
 
 def _context_score(text: str, number: str, keywords: List[str], window: int = 150) -> int:
-    score = 0
+    """Score keyword proximity; same-line occurrences are weighted highest.
+
+    Scoring per keyword occurrence:
+    - Number appears on the **same line** as the keyword: ``+8``
+    - Number appears within ±*window* characters (any line): ``+2``
+
+    The same-line bonus ensures that a number printed directly beside a
+    keyword (e.g. "מספר דוח: 51903219") scores far higher than a number
+    that merely happens to be within the character window, even if the
+    latter appears more frequently in the document.
+    """
     if not number:
-        return score
-    for keyword in keywords:
-        for match in re.finditer(re.escape(keyword), text):
+        return 0
+    score = 0
+
+    # Same-line bonus (highest priority)
+    for kw in keywords:
+        for line in text.splitlines():
+            if re.search(re.escape(kw), line) and number in line:
+                score += 8
+
+    # Window proximity (lower priority, catches multi-line layouts)
+    for kw in keywords:
+        for match in re.finditer(re.escape(kw), text):
             start = max(0, match.start() - window)
             end = min(len(text), match.end() + window)
             if number in text[start:end]:
                 score += 2
+
     return score
 
 
 def _candidate_score(
     candidate: str, counts: Counter, kind: str, text: str
-) -> Tuple[int, bool, int, int]:
+) -> Tuple[int, int, bool, int]:
+    """Return a comparison tuple for *candidate* (higher is better).
+
+    The tuple is ordered so that **context proximity wins first**, breaking
+    ties by frequency, then by preferred length, then by length penalty.
+    This ensures that a number appearing next to a relevant keyword beats
+    an unrelated number that happens to occur more often.
+    """
     if kind == "plate":
+        ctx = _context_score(text, candidate, PLATE_KEYWORDS)
         return (
+            ctx,
             counts[candidate],
             len(candidate) in (7, 8),
-            _context_score(text, candidate, PLATE_KEYWORDS),
             -abs(len(candidate) - 8),
         )
+    ctx = _context_score(text, candidate, FINE_KEYWORDS)
     return (
+        ctx,
         counts[candidate],
         len(candidate) in (8, 9),
-        _context_score(text, candidate, FINE_KEYWORDS),
         -abs(len(candidate) - 8),
     )
 
 
 def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[str, Any]:
-    """Extract plate/fine heuristics from OCR text blocks."""
+    """Extract plate/fine heuristics from OCR text blocks.
+
+    Selection rules
+    ---------------
+    * Plate candidates must be exactly 7 or 8 digits.
+    * Fine candidates must be 7–10 digits.
+    * **Context is required**: a candidate is only accepted when it appears
+      within ±150 characters of at least one keyword from the relevant set
+      (``PLATE_KEYWORDS`` / ``FINE_KEYWORDS``).  If no candidate satisfies
+      this constraint the field is returned as ``None`` so that the LLM
+      fallback can run.
+    * **No duplicates**: plate and fine must differ.  If they somehow end up
+      equal, the field with the higher context score keeps its value; the
+      other is set to ``None`` to trigger LLM fallback.
+    * Context score is the **primary** sort key; frequency (Counter) and
+      length preference are tie-breakers.
+
+    Debug logging
+    -------------
+    Set the environment variable ``OCR_DEBUG=1`` to emit detailed candidate
+    scores at ``DEBUG`` level.  Secrets (e.g. ``OPENAI_API_KEY``) are never
+    included in these logs; use :func:`mask_secret` for any sensitive value
+    you need to reference.
+    """
     full_text = f"{ocr_text}\n{numeric_text}"
     raw = re.findall(r"\d[\d\s\-./,:]{4,16}\d", full_text)
     cleaned = ["".join(ch for ch in token if ch.isdigit()) for token in raw]
     cleaned = [n for n in cleaned if 6 <= len(n) <= 12 and len(set(n)) > 2]
+
+    debug = _env_flag("OCR_DEBUG", default=False)
+
     if not cleaned:
+        if debug:
+            logger.debug("OCR heuristic: no numeric candidates found")
         return {
             "plate": None,
             "fine": None,
@@ -317,24 +395,97 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         }
 
     counts: Counter = Counter(cleaned)
+
+    if debug:
+        top_n = counts.most_common(10)
+        logger.debug("OCR heuristic candidates (top %d): %s", len(top_n), top_n)
+
+    # --- Plate selection ---------------------------------------------------
     plate_candidates = [n for n in cleaned if len(n) in (7, 8)]
-    best_plate = (
+
+    if debug:
+        for n in sorted(set(plate_candidates), key=lambda x: _candidate_score(x, counts, "plate", ocr_text), reverse=True)[:5]:
+            sc = _candidate_score(n, counts, "plate", ocr_text)
+            logger.debug("  plate candidate %s score=%s", n, sc)
+
+    best_plate_pre: str | None = (
         max(plate_candidates, key=lambda n: _candidate_score(n, counts, "plate", ocr_text))
         if plate_candidates
         else None
     )
 
+    # Context requirement for plate
+    plate_ctx = _context_score(ocr_text, best_plate_pre or "", PLATE_KEYWORDS) if best_plate_pre else 0
+    if best_plate_pre and plate_ctx == 0:
+        if debug:
+            logger.debug("  plate %s rejected: no context proximity", best_plate_pre)
+        best_plate: str | None = None
+        plate_ctx = 0
+    else:
+        best_plate = best_plate_pre
+
+    # --- Fine selection ----------------------------------------------------
+    # Exclude best_plate (the accepted plate, after context check) to prevent
+    # the same number occupying both slots.  If best_plate was rejected (None),
+    # no number is excluded so all 7-10 digit candidates can compete.
     fine_candidates = [n for n in cleaned if 7 <= len(n) <= 10 and n != best_plate]
-    best_fine = (
+
+    if debug:
+        for n in sorted(set(fine_candidates), key=lambda x: _candidate_score(x, counts, "fine", ocr_text), reverse=True)[:5]:
+            sc = _candidate_score(n, counts, "fine", ocr_text)
+            logger.debug("  fine candidate %s score=%s", n, sc)
+
+    best_fine_pre: str | None = (
         max(fine_candidates, key=lambda n: _candidate_score(n, counts, "fine", ocr_text))
         if fine_candidates
         else None
     )
 
-    plate_ctx = _context_score(ocr_text, best_plate or "", PLATE_KEYWORDS) if best_plate else 0
-    fine_ctx = _context_score(ocr_text, best_fine or "", FINE_KEYWORDS) if best_fine else 0
+    # Context requirement for fine
+    fine_ctx = _context_score(ocr_text, best_fine_pre or "", FINE_KEYWORDS) if best_fine_pre else 0
+    if best_fine_pre and fine_ctx == 0:
+        if debug:
+            logger.debug("  fine %s rejected: no context proximity", best_fine_pre)
+        best_fine: str | None = None
+        fine_ctx = 0
+    else:
+        best_fine = best_fine_pre
+
+    # --- Tie-break if plate == fine ----------------------------------------
+    if best_plate and best_fine and best_plate == best_fine:
+        if debug:
+            logger.debug(
+                "  plate and fine equal (%s): breaking tie by context score"
+                " (plate_ctx=%d, fine_ctx=%d)",
+                best_plate,
+                plate_ctx,
+                fine_ctx,
+            )
+        if plate_ctx >= fine_ctx:
+            if debug:
+                logger.debug("  plate wins tie-break → fine set to None")
+            best_fine = None
+            fine_ctx = 0
+        else:
+            if debug:
+                logger.debug("  fine wins tie-break → plate set to None")
+            best_plate = None
+            plate_ctx = 0
+
     plate_confident = bool(best_plate and counts[best_plate] >= 2 and plate_ctx >= 2)
     fine_confident = bool(best_fine and counts[best_fine] >= 2 and fine_ctx >= 2)
+
+    if debug:
+        logger.debug(
+            "OCR heuristic winners: plate=%s (ctx=%d, confident=%s),"
+            " fine=%s (ctx=%d, confident=%s)",
+            best_plate,
+            plate_ctx,
+            plate_confident,
+            best_fine,
+            fine_ctx,
+            fine_confident,
+        )
 
     return {
         "plate": best_plate,
