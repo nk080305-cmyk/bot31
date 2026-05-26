@@ -1,20 +1,22 @@
 """Smoke tests and unit tests for bot.openai_client helpers."""
 
 import asyncio
-import json
+from types import SimpleNamespace
 
 import pytest
 
 from bot.openai_client import (
+    # существующие импорты из main (оставь все которые были)
     _best_fine_candidate,
-    _best_plate_candidate,
     _context_digits_near_keywords,
     _digits_only,
     extract_fine_details,
     extract_fine_number_only,
     generate_appeal,
+    # новые из PR
+    extract_vision_fields,
+    normalize_license_plate,
 )
-
 
 class _DummyResponse:
     def __init__(self, content: str):
@@ -76,6 +78,10 @@ def test_digits_only_empty():
 
 def test_digits_only_all_non_digits():
     assert _digits_only("abc!@#") == ""
+
+
+def test_normalize_license_plate_strips_separators():
+    assert normalize_license_plate("12-345 678") == "12345678"
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +168,78 @@ def test_best_fine_candidate_excludes_plate():
 
 def test_best_fine_candidate_empty_input():
     assert _best_fine_candidate("") is None
+
+
+<def test_extract_vision_fields_normalizes_type2_notice_and_plate(monkeypatch, tmp_path):
+    image_path = tmp_path / "notice.jpg"
+    image_path.write_bytes(b"fake-jpeg")
+    calls = []
+
+    async def fake_create(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            output_text='{"fine_notice_number":"12345-67890","license_plate":"12-345-678"}'
+        )
+
+    monkeypatch.setattr(
+        "bot.openai_client._client",
+        SimpleNamespace(responses=SimpleNamespace(create=fake_create)),
+    )
+
+    result = asyncio.run(
+        extract_vision_fields(
+            str(image_path),
+            'מספר הודעת תשלום קנס: 12345-67890\nתעודת זהות: 123456789',
+        )
+    )
+
+    assert result == {
+        "fine_notice_number": "1234567890",
+        "license_plate": "12345678",
+    }
+    assert calls[0]["text"]["format"]["type"] == "json_schema"
+    assert calls[0]["text"]["format"]["strict"] is True
+
+
+def test_extract_vision_fields_rejects_9_digit_tz_for_type2(monkeypatch, tmp_path):
+    image_path = tmp_path / "notice.png"
+    image_path.write_bytes(b"fake-png")
+
+    async def fake_create(**_kwargs):
+        return SimpleNamespace(
+            output_text='{"fine_notice_number":"123456789","license_plate":"123-4567"}'
+        )
+
+    monkeypatch.setattr(
+        "bot.openai_client._client",
+        SimpleNamespace(responses=SimpleNamespace(create=fake_create)),
+    )
+
+    result = asyncio.run(
+        extract_vision_fields(
+            str(image_path),
+            'מספר הודעת תשלום קנס: 12345-67890\nתעודת זהות: 123456789',
+        )
+    )
+
+    assert result == {"license_plate": "1234567"}
+
+
+def test_extract_vision_fields_returns_empty_on_invalid_json(monkeypatch, tmp_path):
+    image_path = tmp_path / "notice.jpg"
+    image_path.write_bytes(b"fake-jpeg")
+
+    async def fake_create(**_kwargs):
+        return SimpleNamespace(output_text="not-json")
+
+    monkeypatch.setattr(
+        "bot.openai_client._client",
+        SimpleNamespace(responses=SimpleNamespace(create=fake_create)),
+    )
+
+    result = asyncio.run(extract_vision_fields(str(image_path), ""))
+
+    assert result == {}
 
 
 def test_extract_fine_details_type2_prefers_10_11_and_plate_anchor(monkeypatch):

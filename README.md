@@ -12,7 +12,7 @@ Supports **Russian 🇷🇺 / Hebrew 🇮🇱 / English 🇬🇧** UI; appeal le
 | **Multi-user** | Each user has an independent session |
 | **File upload** | JPG, PNG, PDF – max 15 MB (for best OCR accuracy, send as Telegram document/file) |
 | **OCR** | Tesseract (heb+eng) with OpenCV preprocessing + numeric-focused OCR fallback for fine numbers |
-| **AI extraction** | OpenAI GPT-4o extracts structured fields with per-field confidence scores |
+| **AI extraction** | OpenAI GPT-4o extracts structured fields with per-field confidence scores; optional vision extraction can read fine notice number + licence plate directly from uploaded photos |
 | **Data correction** | After extraction, ✅/❌ inline buttons let users confirm or fix any field (fine number, violation text, date, amount, licence plate, location, deadline) before generating the appeal |
 | **Appeal reason selection** | After confirming data, choose from 5 localised reasons (sign not visible, data error, force majeure, permit, or free text); reason is embedded in the Hebrew letter |
 | **Appeal generation** | Formal Hebrew letter using confirmed facts only |
@@ -60,6 +60,7 @@ docker compose logs -f
 | `TELEGRAM_BOT_TOKEN` | ✅ | Bot token from @BotFather |
 | `OPENAI_API_KEY` | ✅ | OpenAI API key |
 | `OPENAI_MODEL` | | Model to use (default: `gpt-4o`) |
+| `VISION_EXTRACT` | | Set to `1` to always attempt image-based extraction of `fine_notice_number` and `license_plate` for uploaded JPG/PNG photos; invalid/missing vision output falls back to the existing OCR→LLM path for those fields |
 | `ENCRYPTION_KEY` | | Explicit encryption secret; falls back to bot token derivation |
 | `LOG_LEVEL` | | Python log level (default: `INFO`) |
 | `OCR_MULTI_PREPROCESS` | | Enable improved OCR variants + multi-pass OCR (`0` default, set `1` to enable) |
