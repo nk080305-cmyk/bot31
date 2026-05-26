@@ -31,7 +31,14 @@ TESSERACT_NUMERIC_PSM_MODES = [7, 6, 11]
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
 
 PLATE_KEYWORDS = ["רכב", "מספר רכב"]
-FINE_KEYWORDS = ["דוח", "מספר דוח", "קנס"]
+FINE_KEYWORDS = ["דוח", "מספר דוח", "קנס", "מספר הודעת תשלום קנס", "הודעת תשלום קנס"]
+_FLEX_SEPARATORS = r"[ \t\-./,:_]*"
+_TYPE2_FINE_LABEL_RE = re.compile(
+    r"מספר%sהודעת%sתשלום%sקנס"
+    % (_FLEX_SEPARATORS, _FLEX_SEPARATORS, _FLEX_SEPARATORS),
+    re.IGNORECASE,
+)
+_TZ_LABEL_RE = re.compile(r"תעודת%sזהות" % _FLEX_SEPARATORS, re.IGNORECASE)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -307,19 +314,30 @@ def _context_score(text: str, number: str, keywords: List[str], window: int = 15
     if not number:
         return 0
     score = 0
+    number_re = re.compile(
+        r"(?<!\d)%s(?!\d)" % _FLEX_SEPARATORS.join(re.escape(ch) for ch in number)
+    )
 
     # Same-line bonus (highest priority)
     for kw in keywords:
+        kw_re = re.compile(
+            _FLEX_SEPARATORS.join(re.escape(part) for part in kw.split()),
+            re.IGNORECASE,
+        )
         for line in text.splitlines():
-            if re.search(re.escape(kw), line) and number in line:
+            if kw_re.search(line) and number_re.search(line):
                 score += 8
 
     # Window proximity (lower priority, catches multi-line layouts)
     for kw in keywords:
-        for match in re.finditer(re.escape(kw), text):
+        kw_re = re.compile(
+            _FLEX_SEPARATORS.join(re.escape(part) for part in kw.split()),
+            re.IGNORECASE,
+        )
+        for match in kw_re.finditer(text):
             start = max(0, match.start() - window)
             end = min(len(text), match.end() + window)
-            if number in text[start:end]:
+            if number_re.search(text[start:end]):
                 score += 2
 
     return score
@@ -358,7 +376,9 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     Selection rules
     ---------------
     * Plate candidates must be exactly 7 or 8 digits.
-    * Fine candidates must be 7–10 digits.
+    * Fine candidates are normally 7–10 digits. For type #2 notices where the
+      label ``מספר הודעת תשלום קנס`` is present, fine candidates are restricted
+      to 10–11 digits and numbers close to ``תעודת זהות`` are ignored.
     * **Context is required**: a candidate is only accepted when it appears
       within ±150 characters of at least one keyword from the relevant set
       (``PLATE_KEYWORDS`` / ``FINE_KEYWORDS``).  If no candidate satisfies
@@ -428,7 +448,23 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     # Exclude best_plate (the accepted plate, after context check) to prevent
     # the same number occupying both slots.  If best_plate was rejected (None),
     # no number is excluded so all 7-10 digit candidates can compete.
-    fine_candidates = [n for n in cleaned if 7 <= len(n) <= 10 and n != best_plate]
+    is_type2_notice = bool(_TYPE2_FINE_LABEL_RE.search(ocr_text))
+    if is_type2_notice:
+        fine_candidates = []
+        for n in cleaned:
+            if n == best_plate or len(n) not in (10, 11):
+                continue
+            number_re = re.compile(
+                r"(?<!\d)%s(?!\d)" % _FLEX_SEPARATORS.join(re.escape(ch) for ch in n)
+            )
+            near_tz = any(
+                _TZ_LABEL_RE.search(line) and number_re.search(line)
+                for line in ocr_text.splitlines()
+            )
+            if not near_tz:
+                fine_candidates.append(n)
+    else:
+        fine_candidates = [n for n in cleaned if 7 <= len(n) <= 10 and n != best_plate]
 
     if debug:
         for n in sorted(set(fine_candidates), key=lambda x: _candidate_score(x, counts, "fine", ocr_text), reverse=True)[:5]:

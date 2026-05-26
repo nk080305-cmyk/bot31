@@ -73,6 +73,12 @@ def test_context_digits_near_keywords_deduplicates():
     assert result.count("12345678") == 1
 
 
+def test_context_digits_near_keywords_tolerates_punctuation_in_keyword():
+    text = "מספר-הודעת/תשלום,קנס: 10.234.567.890"
+    result = _context_digits_near_keywords(text, ["מספר הודעת תשלום קנס"], 10, 11)
+    assert "10234567890" in result
+
+
 def test_context_digits_near_keywords_empty_text():
     assert _context_digits_near_keywords("", ["מספר דוח"], 7, 13) == []
 

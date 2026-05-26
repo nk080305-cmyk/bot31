@@ -7,6 +7,7 @@ from typing import Iterable, List
 _MIN_FINE_NUMBER_LEN = 6
 _MAX_FINE_NUMBER_LEN = 12
 _SEPARATORS_RE = re.compile(r"[ \t\-./:,_]+")
+_OPTIONAL_SEPARATORS = r"[ \t\-./:,_]*"
 _CANDIDATE_MIN_REPEAT = _MIN_FINE_NUMBER_LEN - 1
 _CANDIDATE_MAX_REPEAT = _MAX_FINE_NUMBER_LEN - 1
 _CANDIDATE_RE = re.compile(
@@ -14,7 +15,17 @@ _CANDIDATE_RE = re.compile(
     % (_CANDIDATE_MIN_REPEAT, _CANDIDATE_MAX_REPEAT)
 )
 _KEYWORD_RE = re.compile(
-    r"(מס(?:פר)?\s*דוח|номер\s*штрафа|fine\s*(?:number|no|#)|ticket\s*(?:number|no|#))",
+    r"(מס(?:פר)?%sדוח|מספר%sהודעת%sתשלום%sקנס|номер\s*штрафа|fine\s*(?:number|no|#)|ticket\s*(?:number|no|#))"
+    % (_OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS),
+    re.IGNORECASE,
+)
+_TYPE2_FINE_LABEL_RE = re.compile(
+    r"מספר%sהודעת%sתשלום%sקנס"
+    % (_OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS),
+    re.IGNORECASE,
+)
+_TZ_LABEL_RE = re.compile(
+    r"תעודת%sזהות" % _OPTIONAL_SEPARATORS,
     re.IGNORECASE,
 )
 _OCR_DIGIT_FIXES = {
@@ -71,9 +82,16 @@ def is_valid_fine_number(
 
 
 def find_fine_number_candidates(text: str) -> List[str]:
-    """Extract normalized fine-number candidates from OCR text."""
+    """Extract normalized fine-number candidates from OCR text.
+
+    For type #2 Israeli fine notices (``מספר הודעת תשלום קנס``), candidates are
+    restricted to 10–11 digits and numbers near ``תעודת זהות`` are ignored to
+    avoid confusing TZ with the fine number.
+    """
     if not text:
         return []
+
+    is_type2_notice = bool(_TYPE2_FINE_LABEL_RE.search(text))
 
     raw_candidates: List[str] = []
     lines = text.splitlines()
@@ -87,8 +105,20 @@ def find_fine_number_candidates(text: str) -> List[str]:
     normalized: List[str] = []
     for candidate in raw_candidates:
         value = normalize_fine_number(candidate, aggressive=True)
-        if _MIN_FINE_NUMBER_LEN <= len(value) <= _MAX_FINE_NUMBER_LEN:
-            normalized.append(value)
+        if not (_MIN_FINE_NUMBER_LEN <= len(value) <= _MAX_FINE_NUMBER_LEN):
+            continue
+        if is_type2_notice:
+            if len(value) not in (10, 11):
+                continue
+            number_re = re.compile(
+                r"(?<!\d)%s(?!\d)" % _OPTIONAL_SEPARATORS.join(re.escape(ch) for ch in value)
+            )
+            if any(
+                _TZ_LABEL_RE.search(line) and number_re.search(line)
+                for line in text.splitlines()
+            ):
+                continue
+        normalized.append(value)
     return normalized
 
 

@@ -30,6 +30,26 @@ def test_find_fine_number_candidates_prefers_keyword_scope():
     assert "51903219" in candidates
 
 
+def test_find_fine_number_candidates_type2_avoids_tz():
+    text = (
+        "מספר הודעת תשלום קנס: 12345-67890\n"
+        "תעודת זהות: 123456789\n"
+    )
+    candidates = find_fine_number_candidates(text)
+    assert "1234567890" in candidates
+    assert "123456789" not in candidates
+
+
+def test_find_fine_number_candidates_type2_merged_label_punctuation():
+    text = (
+        "מספר-הודעת/תשלום,קנס 10.234.567.890\n"
+        "תעודת-זהות 234567890\n"
+    )
+    candidates = find_fine_number_candidates(text)
+    assert "10234567890" in candidates
+    assert "234567890" not in candidates
+
+
 def test_pick_best_fine_number():
     assert pick_best_fine_number(["12345678", "12345678", "999999"]) == "12345678"
 

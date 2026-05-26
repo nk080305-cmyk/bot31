@@ -32,9 +32,22 @@ _HEURISTIC_PLATE_CONFIDENCE = 0.65  # cap for OCR-heuristic plate guesses
 _HEURISTIC_FINE_CONFIDENCE = 0.70   # cap for OCR-heuristic fine-number guesses
 
 _PLATE_KEYWORDS = ["מספר רכב", "לוחית", "לוחית רישוי", "רכב", "vehicle", "plate"]
-_FN_KEYWORDS = ["מספר דוח", "מס' דוח", "מס דוח", "דוח", "fine", "ticket"]
+_FN_KEYWORDS = [
+    "מספר דוח",
+    "מס' דוח",
+    "מס דוח",
+    "דוח",
+    "מספר הודעת תשלום קנס",
+    "הודעת תשלום קנס",
+    "fine",
+    "ticket",
+]
 # Fine-number length → sort priority (prefer 8-digit, then 9, 10, 7; others last)
 _FINE_LEN_RANK = {8: 5, 9: 4, 10: 3, 7: 2}
+_TYPE2_FINE_LABEL_RE = re.compile(
+    r"מספר[ \t\-./,:_]*הודעת[ \t\-./,:_]*תשלום[ \t\-./,:_]*קנס",
+    re.IGNORECASE,
+)
 
 
 def _digits_only(text: str) -> str:
@@ -60,11 +73,13 @@ def _context_digits_near_keywords(
     # The pattern anchors on a leading and trailing digit (accounting for the
     # two mandatory digit anchors, the repetition range is [min_len-2, max_len-2]).
     _pat = re.compile(
-        r"\d[\d \t\-./,:_]{%d,%d}\d" % (min_len - 2, max_len - 2)
+        r"(?<!\d)(?:\d[ \t\-./,:_]?){%d,%d}\d(?!\d)" % (min_len - 1, max_len - 1)
     )
+    sep_pattern = r"[ \t\-./,:_]*"
     seen: dict = {}
     for kw in keywords:
-        for m in re.finditer(re.escape(kw), text, re.IGNORECASE | re.UNICODE):
+        kw_pattern = sep_pattern.join(re.escape(part) for part in kw.split())
+        for m in re.finditer(kw_pattern, text, re.IGNORECASE | re.UNICODE):
             start = max(0, m.start() - window // 2)
             end = min(len(text), m.end() + window // 2)
             snippet = text[start:end]
@@ -96,6 +111,10 @@ def _best_fine_candidate(
     if plate:
         candidates = [c for c in candidates if c != plate]
     return pick_best_fine_number(candidates) or None
+
+
+def _is_type2_notice(ocr_text: str) -> bool:
+    return bool(_TYPE2_FINE_LABEL_RE.search(ocr_text or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +149,8 @@ OCR TEXT:
 
 Important rules:
 - fine_number must be digits only (remove spaces, dashes, punctuation).
+- For notices with the label "מספר הודעת תשלום קנס", prefer a 10-11 digit
+  fine_number and do not confuse it with 9-digit "תעודת זהות".
 - If fine_number is uncertain, still return your best guess with lower confidence.
 - Return ALL listed fields, even when value is null.
 
@@ -146,6 +167,8 @@ Return JSON object with exactly:
 
 Rules:
 - fine_number should contain digits only.
+- If "מספר הודעת תשלום קנס" is present, fine_number should be 10-11 digits.
+- Do not return 9-digit "תעודת זהות" as fine_number.
 - Use both OCR blocks if provided.
 - If not found, return {"fine_number": null, "confidence": 0.0}.
 
@@ -210,6 +233,7 @@ async def extract_fine_details(
     """
     prompt = _EXTRACTION_PROMPT.format(ocr_text=ocr_text[:5000])
     try:
+        is_type2_notice = _is_type2_notice(ocr_text)
         response = await _client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
@@ -243,7 +267,11 @@ async def extract_fine_details(
             ctx_plate_best: Optional[str] = ctx_plate_cands[0] if ctx_plate_cands else None
 
             ctx_fine_cands = _context_digits_near_keywords(
-                ocr_text, _FN_KEYWORDS, 7, 13, window=260
+                ocr_text,
+                _FN_KEYWORDS,
+                10 if is_type2_notice else 7,
+                11 if is_type2_notice else 13,
+                window=260,
             )
             if ctx_fine_cands:
                 ctx_fine_cands.sort(
@@ -280,12 +308,15 @@ async def extract_fine_details(
                 if (
                     (not fn_val2)
                     or (len(fn_val2) < 7)
+                    or (is_type2_notice and len(fn_val2) not in (10, 11))
                     or (plate_val2 and fn_val2 == plate_val2)
                     or (plate_val2 and len(fn_val2) <= len(plate_val2))
                 ):
                     best_fn = ctx_fine_best or _best_fine_candidate(
                         numeric_ocr_text, plate=plate_val2
                     )
+                    if is_type2_notice and best_fn and len(best_fn) not in (10, 11):
+                        best_fn = None
                     if best_fn:
                         result["fine_number"]["value"] = best_fn
                         old_c = result["fine_number"].get("confidence", 0.5)
