@@ -22,6 +22,10 @@ from aiogram.types import Message
 
 from bot.config import CASES_DIR, MAX_FILE_SIZE
 from bot.db import add_audit_log, get_or_create_user, save_case
+from bot.debug_export import copy_file, is_enabled as is_debug_export_enabled
+from bot.debug_export import reset_context as reset_debug_context
+from bot.debug_export import set_context as set_debug_context
+from bot.debug_export import utc_timestamp, write_json, write_text
 from bot.encryption import encrypt_bytes
 from bot.formatters import format_fine_details
 from bot.fine_number import (
@@ -154,12 +158,16 @@ async def _process_file(
     await message.answer(t("processing", lang))
 
     tmp_path: str | None = None
+    case_id = str(uuid.uuid4())
+    debug_token = set_debug_context(case_id, utc_timestamp()) if is_debug_export_enabled() else None
     try:
         # --- download ---
         file_meta = await message.bot.get_file(file_id)
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
             tmp_path = tmp.name
         await message.bot.download_file(file_meta.file_path, destination=tmp_path)
+        if debug_token is not None:
+            copy_file(tmp_path, "original_upload" + ext)
 
         # --- OCR ---
         try:
@@ -172,6 +180,10 @@ async def _process_file(
         if not ocr_text or len(ocr_text.strip()) < 10:
             await message.answer(t("ocr_failed", lang))
             return
+
+        if debug_token is not None:
+            write_text("ocr.txt", ocr_text)
+            write_text("ocr_numeric.txt", numeric_ocr_text)
 
         await message.answer(t("ocr_done", lang))
 
@@ -222,7 +234,9 @@ async def _process_file(
             "details": details,
             "original_file_name": file_name,
         }
-        case_id = await save_case(message.from_user.id, case_data, enc_path)
+        case_id = await save_case(message.from_user.id, case_data, enc_path, case_id=case_id)
+        if debug_token is not None:
+            write_json("parsed_fields.json", details)
 
         # --- Audit log (PII-containing payload, stored encrypted) ---
         await add_audit_log(
@@ -249,6 +263,8 @@ async def _process_file(
         logger.error("Unexpected error for user_id=%s: %s", message.from_user.id, exc)
         await message.answer(t("error_processing", lang))
     finally:
+        if debug_token is not None:
+            reset_debug_context(debug_token)
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
