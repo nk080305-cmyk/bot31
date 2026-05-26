@@ -65,6 +65,27 @@ docker compose logs -f
 | `LOG_LEVEL` | | Python log level (default: `INFO`) |
 | `OCR_MULTI_PREPROCESS` | | Enable improved OCR variants + multi-pass OCR (`0` default, set `1` to enable) |
 | `OCR_MULTI_VARIANTS` | | Alias for `OCR_MULTI_PREPROCESS`; if set, it takes precedence |
+| `OCR_DEBUG` | | Enable OCR/LLM debug artifact export to `/data/debug` (`0` default, set `1` to enable) |
+| `OCR_DEBUG_MAX_CASES` | | Max debug case artifact groups to keep in `/data/debug` (default: `50`) |
+
+---
+
+## OCR_DEBUG artifact export (`/data/debug`)
+
+When `OCR_DEBUG=1` (or `DEBUG=1`), the bot writes unmasked troubleshooting artifacts for each processed case into `/data/debug`:
+
+- original uploaded file (`*_original_upload.<ext>`)
+- OCR preprocessed images (`*_preprocessed_general.png`, `*_preprocessed_numeric.png`)
+- OCR text outputs (`*_ocr.txt`, `*_ocr_numeric.txt`)
+- full LLM request payloads (`*_llm_request_*.json`) without secrets
+- full LLM response payloads (`*_llm_response_*.json`)
+- final parsed fields used by the bot (`*_parsed_fields.json`)
+
+Filename format: `{case_id}_{YYYYmmdd_HHMMSSZ}_{artifact_name}`.
+
+Retention is bounded automatically: only the most recent `OCR_DEBUG_MAX_CASES` case groups are kept (default 50), older debug files are deleted.
+
+> Security note: API keys and bot tokens are never written into these debug payloads.
 
 ---
 

@@ -6,16 +6,43 @@ from types import SimpleNamespace
 import pytest
 
 from bot.openai_client import (
+    # существующие импорты из main (оставь все которые были)
     _best_fine_candidate,
-    _best_plate_candidate,
     _context_digits_near_keywords,
     _digits_only,
     extract_fine_details,
     extract_fine_number_only,
-    extract_vision_fields,
     generate_appeal,
+    # новые из PR
+    extract_vision_fields,
     normalize_license_plate,
 )
+
+class _DummyResponse:
+    def __init__(self, content: str):
+        self.id = "resp_1"
+        self.model = "test-model"
+        self.created = 0
+        self.usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        self.choices = [type("Choice", (), {"message": type("Msg", (), {"content": content})()})()]
+
+
+class _DummyCompletions:
+    def __init__(self, content: str):
+        self._content = content
+
+    async def create(self, **_kwargs):
+        return _DummyResponse(self._content)
+
+
+class _DummyChat:
+    def __init__(self, content: str):
+        self.completions = _DummyCompletions(content)
+
+
+class _DummyClient:
+    def __init__(self, content: str):
+        self.chat = _DummyChat(content)
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +170,7 @@ def test_best_fine_candidate_empty_input():
     assert _best_fine_candidate("") is None
 
 
-def test_extract_vision_fields_normalizes_type2_notice_and_plate(monkeypatch, tmp_path):
+<def test_extract_vision_fields_normalizes_type2_notice_and_plate(monkeypatch, tmp_path):
     image_path = tmp_path / "notice.jpg"
     image_path.write_bytes(b"fake-jpeg")
     calls = []
@@ -213,3 +240,26 @@ def test_extract_vision_fields_returns_empty_on_invalid_json(monkeypatch, tmp_pa
     result = asyncio.run(extract_vision_fields(str(image_path), ""))
 
     assert result == {}
+
+
+def test_extract_fine_details_type2_prefers_10_11_and_plate_anchor(monkeypatch):
+    import bot.openai_client as mod
+
+    ocr_text = (
+        "מספר הודעת תשלום קנס: 12345-67890\n"
+        "תעודת זהות: 123456789\n"
+        "מס' רכב: 12-345-678\n"
+    )
+    llm_payload = json.dumps(
+        {
+            "fine_number": {"value": "123456789", "confidence": 0.95},
+            "vehicle_plate": {"value": "", "confidence": 0.1},
+        },
+        ensure_ascii=False,
+    )
+    monkeypatch.setattr(mod, "_client", _DummyClient(llm_payload))
+
+    result = asyncio.run(extract_fine_details(ocr_text, "12345 67890 123456789 12 345 678"))
+    assert result["fine_number"]["value"] == "1234567890"
+    assert result["fine_number"]["value"] != "123456789"
+    assert result["vehicle_plate"]["value"] == "12345678"

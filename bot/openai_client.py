@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from openai import AsyncOpenAI
 
 from bot.config import OPENAI_API_KEY, OPENAI_MODEL
+from bot.debug_export import write_json
 from bot.fine_number import (
     find_fine_number_candidates,
     normalize_fine_number,
@@ -35,7 +36,7 @@ _client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 _HEURISTIC_PLATE_CONFIDENCE = 0.65  # cap for OCR-heuristic plate guesses
 _HEURISTIC_FINE_CONFIDENCE = 0.70   # cap for OCR-heuristic fine-number guesses
 
-_PLATE_KEYWORDS = ["מספר רכב", "לוחית", "לוחית רישוי", "רכב", "vehicle", "plate"]
+_PLATE_KEYWORDS = ["מספר רכב", "מס רכב", "מס' רכב", "לוחית", "לוחית רישוי", "vehicle", "plate"]
 _FN_KEYWORDS = [
     "מספר דוח",
     "מס' דוח",
@@ -348,17 +349,31 @@ async def extract_fine_details(
         }
     """
     prompt = _EXTRACTION_PROMPT.format(ocr_text=ocr_text[:5000])
+    llm_request_payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": _EXTRACTION_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+        "max_tokens": 800,
+    }
     try:
+        write_json("llm_request_extract_fine_details.json", llm_request_payload)
         is_type2_notice = _is_type2_notice(ocr_text)
         response = await _client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": _EXTRACTION_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-            max_tokens=800,
+            **llm_request_payload,
+        )
+        write_json(
+            "llm_response_extract_fine_details.json",
+            {
+                "id": getattr(response, "id", None),
+                "model": getattr(response, "model", None),
+                "created": getattr(response, "created", None),
+                "usage": getattr(response, "usage", None),
+                "content": response.choices[0].message.content,
+            },
         )
         result: Dict[str, Any] = json.loads(response.choices[0].message.content)
         fine_number_data = result.get("fine_number")
@@ -378,7 +393,7 @@ async def extract_fine_details(
 
             # Context-aware candidates from the general OCR text
             ctx_plate_cands = _context_digits_near_keywords(
-                ocr_text, _PLATE_KEYWORDS, 5, 8, window=200
+                ocr_text, _PLATE_KEYWORDS, 7, 8, window=200
             )
             ctx_plate_best: Optional[str] = ctx_plate_cands[0] if ctx_plate_cands else None
 
@@ -468,16 +483,30 @@ async def extract_fine_number_only(ocr_text: str, numeric_ocr_text: str = "") ->
         ocr_text=ocr_text[:5000],
         numeric_ocr_text=numeric_ocr_text[:3000],
     )
+    llm_request_payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": _EXTRACTION_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.0,
+        "max_tokens": 200,
+    }
     try:
+        write_json("llm_request_extract_fine_number_only.json", llm_request_payload)
         response = await _client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": _EXTRACTION_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=200,
+            **llm_request_payload,
+        )
+        write_json(
+            "llm_response_extract_fine_number_only.json",
+            {
+                "id": getattr(response, "id", None),
+                "model": getattr(response, "model", None),
+                "created": getattr(response, "created", None),
+                "usage": getattr(response, "usage", None),
+                "content": response.choices[0].message.content,
+            },
         )
         result: Dict[str, Any] = json.loads(response.choices[0].message.content)
         normalized = normalize_fine_number(str(result.get("fine_number") or ""), aggressive=True)

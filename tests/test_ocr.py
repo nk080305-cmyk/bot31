@@ -125,6 +125,16 @@ def test_extract_plate_and_fine_candidates_type2_merged_spaces_and_punctuation()
     assert result["fine"] != "234567890"
 
 
+def test_extract_plate_and_fine_candidates_plate_anchor_with_abbrev_and_separators():
+    ocr_text = (
+        "מס' רכב: 12-345-678\n"
+        "מספר דוח: 5190-3219\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "")
+    assert result["plate"] == "12345678"
+    assert result["fine"] == "51903219"
+
+
 def test_extract_plate_and_fine_candidates_debug_logging(monkeypatch, caplog):
     """With OCR_DEBUG=1 the function emits DEBUG log lines."""
     monkeypatch.setenv("OCR_DEBUG", "1")
