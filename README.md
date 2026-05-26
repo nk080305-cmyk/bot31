@@ -23,6 +23,20 @@ Supports **Russian 🇷🇺 / Hebrew 🇮🇱 / English 🇬🇧** UI; appeal le
 
 ---
 
+## Fine Number Extraction (Type #1 + Type #2 notices)
+
+The output schema is unchanged: `fine_number` remains a digits-only field in the extracted JSON.
+
+The parser now supports two common notice templates:
+
+- **Type #1 parking report** (`דוח חניה` / `מספר דוח`): existing behavior is preserved.
+- **Type #2 payment notice** (`מספר הודעת תשלום קנס`): `fine_number` is detected as **10–11 digits**.
+
+To avoid confusion on type #2 forms, `תעודת זהות` (TZ, 9 digits) is explicitly excluded from `fine_number` candidates.
+Keyword matching is tolerant to OCR punctuation/spacing noise (for example merged or punctuated label text).
+
+---
+
 ## Quick Start
 
 ```bash

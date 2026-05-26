@@ -102,6 +102,29 @@ def test_extract_plate_and_fine_candidates_plate_fine_not_equal():
     assert not (result["plate"] is not None and result["fine"] is not None and result["plate"] == result["fine"])
 
 
+def test_extract_plate_and_fine_candidates_type2_prefers_10_11_digits_not_tz():
+    ocr_text = (
+        "דוח חניה עירוני\n"
+        "מספר הודעת תשלום קנס: 12345-67890\n"
+        "תעודת זהות: 123456789\n"
+        "מספר רכב: 7654321\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "12345 67890 123456789 7654321")
+    assert result["fine"] == "1234567890"
+    assert result["fine"] != "123456789"
+
+
+def test_extract_plate_and_fine_candidates_type2_merged_spaces_and_punctuation():
+    ocr_text = (
+        "מספר-הודעת/תשלום,קנס 10.234.567.890\n"
+        "תעודת-זהות 234.567.890\n"
+        "מספר רכב 12345678\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "")
+    assert result["fine"] == "10234567890"
+    assert result["fine"] != "234567890"
+
+
 def test_extract_plate_and_fine_candidates_debug_logging(monkeypatch, caplog):
     """With OCR_DEBUG=1 the function emits DEBUG log lines."""
     monkeypatch.setenv("OCR_DEBUG", "1")
@@ -162,4 +185,3 @@ def test_mask_secret_one_over_boundary():
     val = "a" * 12  # 7 + 4 + 1
     result = mask_secret(val)
     assert result == "aaaaaaa...aaaa"
-
