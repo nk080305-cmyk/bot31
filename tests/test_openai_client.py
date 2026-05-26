@@ -1,5 +1,8 @@
 """Smoke tests and unit tests for bot.openai_client helpers."""
 
+import asyncio
+import json
+
 import pytest
 
 from bot.openai_client import (
@@ -11,6 +14,33 @@ from bot.openai_client import (
     extract_fine_number_only,
     generate_appeal,
 )
+
+
+class _DummyResponse:
+    def __init__(self, content: str):
+        self.id = "resp_1"
+        self.model = "test-model"
+        self.created = 0
+        self.usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        self.choices = [type("Choice", (), {"message": type("Msg", (), {"content": content})()})()]
+
+
+class _DummyCompletions:
+    def __init__(self, content: str):
+        self._content = content
+
+    async def create(self, **_kwargs):
+        return _DummyResponse(self._content)
+
+
+class _DummyChat:
+    def __init__(self, content: str):
+        self.completions = _DummyCompletions(content)
+
+
+class _DummyClient:
+    def __init__(self, content: str):
+        self.chat = _DummyChat(content)
 
 
 # ---------------------------------------------------------------------------
@@ -132,3 +162,26 @@ def test_best_fine_candidate_excludes_plate():
 
 def test_best_fine_candidate_empty_input():
     assert _best_fine_candidate("") is None
+
+
+def test_extract_fine_details_type2_prefers_10_11_and_plate_anchor(monkeypatch):
+    import bot.openai_client as mod
+
+    ocr_text = (
+        "מספר הודעת תשלום קנס: 12345-67890\n"
+        "תעודת זהות: 123456789\n"
+        "מס' רכב: 12-345-678\n"
+    )
+    llm_payload = json.dumps(
+        {
+            "fine_number": {"value": "123456789", "confidence": 0.95},
+            "vehicle_plate": {"value": "", "confidence": 0.1},
+        },
+        ensure_ascii=False,
+    )
+    monkeypatch.setattr(mod, "_client", _DummyClient(llm_payload))
+
+    result = asyncio.run(extract_fine_details(ocr_text, "12345 67890 123456789 12 345 678"))
+    assert result["fine_number"]["value"] == "1234567890"
+    assert result["fine_number"]["value"] != "123456789"
+    assert result["vehicle_plate"]["value"] == "12345678"

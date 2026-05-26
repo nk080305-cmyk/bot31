@@ -23,6 +23,8 @@ import cv2
 import numpy as np
 import pytesseract
 
+from bot.debug_export import write_image
+
 logger = logging.getLogger(__name__)
 
 TESSERACT_LANG = "heb+eng"
@@ -560,6 +562,8 @@ def ocr_image_with_numeric(image_path: str) -> Tuple[str, str]:
 
     if _is_multi_preprocess_enabled():
         variants = preprocess_variants(img)
+        for idx, variant in enumerate(variants):
+            write_image(f"preprocessed_variant_{idx}.png", variant)
         best_general = _run_tesseract_on_variants(variants)
         best_numeric = _run_tesseract_numeric_on_variants(variants)
         multi_general, multi_numeric = run_ocr_multi(img)
@@ -569,6 +573,8 @@ def ocr_image_with_numeric(image_path: str) -> Tuple[str, str]:
 
     preprocessed = preprocess_image(img)
     numeric_preprocessed = preprocess_numeric_image(img)
+    write_image("preprocessed_general.png", preprocessed)
+    write_image("preprocessed_numeric.png", numeric_preprocessed)
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_general:
         general_path = tmp_general.name

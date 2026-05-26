@@ -96,6 +96,7 @@ async def save_case(
     user_id: int,
     case_data: Dict[str, Any],
     file_path: Optional[str] = None,
+    case_id: Optional[str] = None,
 ) -> str:
     """Persist an encrypted case and return its UUID.
 
@@ -107,7 +108,7 @@ async def save_case(
     """
     from bot.encryption import encrypt  # local import avoids circular dependency at startup
 
-    case_id = str(uuid.uuid4())
+    case_id = case_id or str(uuid.uuid4())
     expires_at = (datetime.utcnow() + timedelta(days=DATA_TTL_DAYS)).isoformat()
     enc_data = encrypt(json.dumps(case_data, ensure_ascii=False))
     enc_file_path = encrypt(file_path) if file_path else None

@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from bot.config import CASES_DIR, DATA_DIR, DB_PATH, LOG_LEVEL, TELEGRAM_BOT_TOKEN
+from bot.config import CASES_DIR, DATA_DIR, DB_PATH, DEBUG_DIR, LOG_LEVEL, TELEGRAM_BOT_TOKEN
 from bot.db import cleanup_expired, init_db
 from bot.handlers.appeal import router as appeal_router
 from bot.handlers.common import router as common_router
@@ -65,6 +65,7 @@ async def main() -> None:
     # Ensure runtime directories exist
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(CASES_DIR, exist_ok=True)
+    os.makedirs(DEBUG_DIR, exist_ok=True)
 
     # Initialise database schema
     await init_db()
