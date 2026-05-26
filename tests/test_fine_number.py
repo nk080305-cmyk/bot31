@@ -7,6 +7,7 @@ from bot.fine_number import (
     pick_best_fine_number,
 )
 from bot.handlers.upload import _apply_heuristic_candidates
+from bot.handlers.upload import _apply_vision_candidates
 from bot.handlers.upload import _ensure_fine_number
 
 
@@ -101,4 +102,17 @@ def test_apply_heuristic_candidates_sets_weak_fields():
     }
     updated = _apply_heuristic_candidates(details, candidates)
     assert updated["vehicle_plate"]["value"] == "12345678"
+    assert updated["fine_number"]["value"] == "51903219"
+
+
+def test_apply_vision_candidates_overrides_only_valid_vision_fields():
+    details = {
+        "vehicle_plate": {"value": "7654321", "confidence": 0.6},
+        "fine_number": {"value": "51903219", "confidence": 0.7},
+    }
+
+    updated = _apply_vision_candidates(details, {"license_plate": "12345678"})
+
+    assert updated["vehicle_plate"]["value"] == "12345678"
+    assert updated["vehicle_plate"]["confidence"] == 0.98
     assert updated["fine_number"]["value"] == "51903219"

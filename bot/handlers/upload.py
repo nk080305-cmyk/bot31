@@ -20,7 +20,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from bot.config import CASES_DIR, MAX_FILE_SIZE
+from bot.config import CASES_DIR, MAX_FILE_SIZE, VISION_EXTRACT
 from bot.db import add_audit_log, get_or_create_user, save_case
 from bot.encryption import encrypt_bytes
 from bot.formatters import format_fine_details
@@ -35,6 +35,7 @@ from bot.keyboards import confirmation_keyboard
 from bot.ocr import extract_plate_and_fine_candidates, extract_text_with_numeric
 from bot.openai_client import extract_fine_details as ai_extract_fine_details
 from bot.openai_client import extract_fine_number_only as ai_extract_fine_number_only
+from bot.openai_client import extract_vision_fields as ai_extract_vision_fields
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -131,6 +132,28 @@ def _apply_heuristic_candidates(details: Dict[str, Any], candidates: Dict[str, A
     return details
 
 
+def _apply_vision_candidates(details: Dict[str, Any], vision_fields: Dict[str, str]) -> Dict[str, Any]:
+    """Override fine/plate fields with validated vision output when available."""
+    if not isinstance(details, dict):
+        details = {}
+    if not isinstance(vision_fields, dict):
+        return details
+
+    if vision_fields.get("license_plate"):
+        details["vehicle_plate"] = {
+            "value": vision_fields["license_plate"],
+            "confidence": 0.98,
+        }
+
+    if vision_fields.get("fine_notice_number"):
+        details["fine_number"] = {
+            "value": vision_fields["fine_notice_number"],
+            "confidence": 0.98,
+        }
+
+    return details
+
+
 # ---------------------------------------------------------------------------
 # Core processing function
 # ---------------------------------------------------------------------------
@@ -176,11 +199,15 @@ async def _process_file(
         await message.answer(t("ocr_done", lang))
 
         heuristic_candidates = extract_plate_and_fine_candidates(ocr_text, numeric_ocr_text)
+        vision_fields: Dict[str, str] = {}
+        if VISION_EXTRACT and ext in {".jpg", ".jpeg", ".png"}:
+            vision_fields = await ai_extract_vision_fields(tmp_path, ocr_text)
 
         # --- OpenAI extraction ---
         try:
             details = await ai_extract_fine_details(ocr_text, numeric_ocr_text)
             details = _apply_heuristic_candidates(details, heuristic_candidates)
+            details = _apply_vision_candidates(details, vision_fields)
             details = await _ensure_fine_number(details, ocr_text, numeric_ocr_text)
         except Exception as exc:
             if heuristic_candidates.get("plate_confident") and heuristic_candidates.get("fine_confident"):
@@ -199,6 +226,7 @@ async def _process_file(
                         "confidence": 0.7,
                     },
                 }
+                details = _apply_vision_candidates(details, vision_fields)
                 details = await _ensure_fine_number(details, ocr_text, numeric_ocr_text)
             else:
                 logger.error("Extraction failed for user_id=%s: %s", message.from_user.id, exc)

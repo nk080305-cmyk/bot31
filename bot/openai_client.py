@@ -1,13 +1,17 @@
 """OpenAI integration for fine-data extraction and Hebrew appeal generation.
 
-Two operations are exposed:
+Three operations are exposed:
 - :func:`extract_fine_details` – parses OCR text into a structured JSON object
   with per-field confidence scores.
+- :func:`extract_vision_fields` – reads an uploaded image directly and returns
+  the fine notice number / licence plate when available.
 - :func:`generate_appeal` – writes a formal Hebrew appeal letter using only
   confirmed facts from the extracted data.
 """
+import base64
 import json
 import logging
+import mimetypes
 import re
 from typing import Any, Dict, List, Optional
 
@@ -126,6 +130,35 @@ _EXTRACTION_SYSTEM = (
     "Extract structured data and respond ONLY with valid JSON."
 )
 
+_VISION_PROMPT = """\
+Inspect the uploaded image of an Israeli traffic fine notice and extract ONLY:
+- fine_notice_number
+- license_plate
+
+Return null for a field when it is not readable.
+
+Rules:
+- fine_notice_number must contain digits only after normalization.
+- If the notice is labeled "מספר הודעת תשלום קנס", fine_notice_number must be 10-11 digits and must not be a 9-digit תעודת זהות.
+- license_plate must be 7 or 8 digits after removing spaces, hyphens, or punctuation.
+- Never invent values.
+
+OCR anchor text (may be noisy, use as a hint only):
+\"\"\"
+{ocr_text}
+\"\"\"
+"""
+
+_VISION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "fine_notice_number": {"type": ["string", "null"]},
+        "license_plate": {"type": ["string", "null"]},
+    },
+    "required": ["fine_notice_number", "license_plate"],
+}
+
 _EXTRACTION_PROMPT = """\
 Extract the following fields from the OCR text of an Israeli traffic fine notice.
 
@@ -208,6 +241,89 @@ _APPEAL_PROMPT = """\
 {fine_details}
 {reason_section}
 כתוב את מכתב הערר בלבד, ללא הסברים נוספים."""
+
+
+def normalize_license_plate(value: str | None) -> str:
+    """Return a digits-only normalized vehicle plate."""
+    return _digits_only(value or "")
+
+
+def _extract_response_text(response: Any) -> str:
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str):
+        return output_text
+    return ""
+
+
+def _validated_vision_fields(payload: Dict[str, Any], ocr_text: str = "") -> Dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+
+    is_type2_notice = _is_type2_notice(ocr_text)
+    fine_notice_number = normalize_fine_number(
+        str(payload.get("fine_notice_number") or ""), aggressive=True
+    )
+    license_plate = normalize_license_plate(payload.get("license_plate"))
+
+    validated: Dict[str, str] = {}
+    if fine_notice_number:
+        if is_type2_notice:
+            if len(fine_notice_number) in (10, 11):
+                validated["fine_notice_number"] = fine_notice_number
+        elif 6 <= len(fine_notice_number) <= 12:
+            validated["fine_notice_number"] = fine_notice_number
+
+    if license_plate and len(license_plate) in (7, 8):
+        validated["license_plate"] = license_plate
+
+    return validated
+
+
+async def extract_vision_fields(image_path: str, ocr_text: str = "") -> Dict[str, str]:
+    """Extract fine notice number and licence plate directly from an image."""
+    mime_type, _ = mimetypes.guess_type(image_path)
+    if mime_type not in {"image/jpeg", "image/png"}:
+        return {}
+
+    with open(image_path, "rb") as fh:
+        image_data = fh.read()
+    image_url = (
+        f"data:{mime_type};base64,{base64.b64encode(image_data).decode('ascii')}"
+    )
+
+    prompt = _VISION_PROMPT.format(ocr_text=(ocr_text or "")[:3000])
+    try:
+        response = await _client.responses.create(
+            model=OPENAI_MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {"type": "input_image", "image_url": image_url, "detail": "high"},
+                    ],
+                }
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "vision_fine_notice_extraction",
+                    "schema": _VISION_SCHEMA,
+                    "strict": True,
+                }
+            },
+            temperature=0.0,
+            max_output_tokens=200,
+        )
+        result = json.loads(_extract_response_text(response))
+    except json.JSONDecodeError:
+        logger.warning("Vision extraction returned invalid JSON")
+        return {}
+    except Exception as exc:
+        logger.warning("Vision extraction failed: %s", exc)
+        return {}
+
+    return _validated_vision_fields(result, ocr_text)
 
 
 async def extract_fine_details(

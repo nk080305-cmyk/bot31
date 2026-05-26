@@ -7,6 +7,12 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
 OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o")
+VISION_EXTRACT: bool = os.getenv("VISION_EXTRACT", "0").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 # Optional explicit encryption key; falls back to bot token derivation when empty
 ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "")
