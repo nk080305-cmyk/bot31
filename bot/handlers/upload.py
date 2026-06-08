@@ -86,7 +86,10 @@ async def _ensure_fine_number(
     candidates = find_fine_number_candidates(f"{ocr_text}\n{numeric_ocr_text}")
     heuristic_value = pick_best_fine_number(candidates)
 
-    needs_focused = not heuristic_value or confidence < 0.75
+    needs_focused = (
+        not is_valid_fine_number(heuristic_value)
+        and (not is_valid_fine_number(current_value) or confidence < 0.75)
+    )
     if needs_focused:
         focused_result = await focused_extractor(ocr_text, numeric_ocr_text)
         focused_value = normalize_fine_number(
