@@ -35,6 +35,13 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
 PLATE_KEYWORDS = ["מספר רכב", "מס רכב", "מס' רכב", "לוחית רישוי", "לוחית"]
 FINE_KEYWORDS = ["דוח", "מספר דוח", "מספר הודעה", "קנס", "מספר הודעת תשלום קנס", "הודעת תשלום קנס"]
 AMOUNT_KEYWORDS = ["סכום", "סכום הקנס", "סך", "קנס", "כפל הקנס", "לתשלום"]
+DECISION_NOTICE_MARKERS = [
+    "הודעה על החלטה להטיל קנס",
+    "תעודת עובד הציבור",
+    "תאור העובדות המהוות",
+]
+_MUNICIPAL_NOTICE_ANCHORS = ["מספר רכב", "יצרן רכב", "גובה הקנס", "הערות הפקח"]
+_DECISION_PLATE_KEYWORDS = ["מספר רכב", "רכב פרטי", "רכב"]
 NARRATIVE_MARKERS = [
     "אני החתום מטה",
     "סיבות",
@@ -245,6 +252,7 @@ def _run_tesseract_on_file(image_path: str) -> str:
 
     best_score, best_text = max(results, key=lambda x: x[0])
     logger.info("OCR best score=%.2f from %d PSM configs", best_score, len(results))
+    logger.info("OCR text preview: %s", best_text[:1000].replace("\n", "\\n"))
     return best_text.strip()
 
 
@@ -267,6 +275,7 @@ def _run_tesseract_on_variants(images: List[np.ndarray]) -> str:
         return ""
     best_score, best_text = max(results, key=lambda x: x[0])
     logger.info("OCR best score=%.2f from %d variant*PSM configs", best_score, len(results))
+    logger.info("OCR text preview: %s", best_text[:1000].replace("\n", "\\n"))
     return best_text.strip()
 
 
@@ -419,6 +428,54 @@ def _line_has_keyword(line: str, keyword: str) -> bool:
     return bool(kw_re.search(line))
 
 
+def _text_has_keyword(text: str, keyword: str) -> bool:
+    kw_re = re.compile(
+        _FLEX_SEPARATORS.join(re.escape(part) for part in keyword.split()),
+        re.IGNORECASE,
+    )
+    return bool(kw_re.search(text))
+
+
+def _matched_keywords(text: str, keywords: list[str]) -> list[str]:
+    return [kw for kw in keywords if _text_has_keyword(text, kw)]
+
+
+def _decision_plate_context_score(text: str, candidate: str) -> int:
+    lines = text.splitlines()
+    if not lines:
+        return 0
+    marker_lines = [
+        idx for idx, line in enumerate(lines)
+        if any(_line_has_keyword(line, marker) for marker in DECISION_NOTICE_MARKERS)
+    ]
+    if not marker_lines:
+        return 0
+    number_re = _digits_pattern(candidate)
+    score = 0
+    for idx, line in enumerate(lines):
+        if not number_re.search(line):
+            continue
+        if any(_line_has_keyword(line, kw) for kw in _DECISION_PLATE_KEYWORDS):
+            score += 4
+        if any(abs(idx - marker_idx) <= 8 for marker_idx in marker_lines):
+            score += 2
+    return score
+
+
+def _format_candidate_summary(
+    candidates: list[str], counts: Counter, kind: str, text: str, limit: int = 5
+) -> list[str]:
+    unique = sorted(
+        set(candidates),
+        key=lambda n: _candidate_score(n, counts, kind, text),
+        reverse=True,
+    )[:limit]
+    return [
+        f"{n}(ctx={_candidate_score(n, counts, kind, text)[0]},cnt={counts[n]})"
+        for n in unique
+    ]
+
+
 def _plate_candidate_profile(text: str, candidate: str) -> Dict[str, int | bool]:
     number_re = _digits_pattern(candidate)
     lines = [line for line in text.splitlines() if number_re.search(line)]
@@ -476,9 +533,20 @@ def _find_first_marker(text: str, markers: list[str]) -> str | None:
 def _detect_fine_template_with_reason(ocr_text: str) -> Tuple[str, str]:
     text = ocr_text or ""
     legacy_label_present = bool(_LEGACY_NOTICE_LABEL_RE.search(text))
+    decision_markers = _matched_keywords(text, DECISION_NOTICE_MARKERS)
+    municipal_markers = _matched_keywords(text, _MUNICIPAL_NOTICE_ANCHORS)
+    if decision_markers:
+        joined_markers = ",".join(decision_markers[:3])
+        return _ANCHOR_BASED_TEMPLATE, f"decision_notice_markers:{joined_markers}"
     if _TYPE2_FINE_LABEL_RE.search(text):
         return _ANCHOR_BASED_TEMPLATE, "explicit_type2_label"
     if _TYPE2_NOTICE_LABEL_RE.search(text):
+        if len(municipal_markers) >= 2:
+            joined_markers = ",".join(municipal_markers[:3])
+            return (
+                _LEGACY_TEMPLATE,
+                f"fallback_legacy_notice:municipal_notice_markers:{joined_markers}",
+            )
         narrative_marker = _find_first_marker(text, NARRATIVE_MARKERS)
         if narrative_marker:
             return (
@@ -567,6 +635,8 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
 
     counts: Counter = Counter(cleaned)
     template, template_reason = _detect_fine_template_with_reason(ocr_text)
+    decision_markers = _matched_keywords(ocr_text, DECISION_NOTICE_MARKERS)
+    municipal_markers = _matched_keywords(ocr_text, _MUNICIPAL_NOTICE_ANCHORS)
     logger.info("Fine OCR routing template_detected=%s reason=%s", template, template_reason)
 
     if debug:
@@ -590,10 +660,33 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         if template == _ANCHOR_BASED_TEMPLATE
         else {}
     )
+    lines = ocr_text.splitlines()
+    municipal_plate_anchor_line = next(
+        (
+            idx
+            for idx, line in enumerate(lines)
+            if any(_line_has_keyword(line, kw) for kw in PLATE_KEYWORDS)
+        ),
+        -1,
+    )
+    plate_candidate_first_line: dict[str, int] = {}
+    for candidate in set(plate_candidates):
+        number_re = _digits_pattern(candidate)
+        first_line = next((idx for idx, line in enumerate(lines) if number_re.search(line)), -1)
+        plate_candidate_first_line[candidate] = first_line
 
     def _plate_rank(n: str) -> Tuple[int, ...]:
         base_score = _candidate_score(n, counts, "plate", ocr_text)
         if template != _ANCHOR_BASED_TEMPLATE:
+            if len(municipal_markers) >= 2 and municipal_plate_anchor_line >= 0:
+                first_line = plate_candidate_first_line.get(n, -1)
+                return (
+                    base_score[0],
+                    first_line >= municipal_plate_anchor_line,
+                    base_score[1],
+                    base_score[2],
+                    base_score[3],
+                )
             return base_score
         profile = plate_profiles.get(n, {})
         return (
@@ -628,6 +721,13 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
 
     # Context requirement for plate
     plate_ctx = _context_score(ocr_text, best_plate_pre or "", PLATE_KEYWORDS) if best_plate_pre else 0
+    decision_plate_ctx = (
+        _decision_plate_context_score(ocr_text, best_plate_pre or "")
+        if best_plate_pre and template == _ANCHOR_BASED_TEMPLATE and decision_markers
+        else 0
+    )
+    if decision_plate_ctx:
+        plate_ctx = max(plate_ctx, decision_plate_ctx)
     if best_plate_pre and plate_ctx == 0:
         if debug:
             profile = plate_profiles.get(best_plate_pre, {})
@@ -652,6 +752,8 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     # Exclude best_plate (the accepted plate, after context check) to prevent
     # the same number occupying both slots.  If best_plate was rejected (None),
     # no number is excluded so all 7-10 digit candidates can compete.
+    municipal_top_candidate_set: set[str] = set()
+    priority_fine_candidates: set[str] = set()
     if template == _ANCHOR_BASED_TEMPLATE:
         fine_candidates = []
         for n in cleaned:
@@ -668,13 +770,14 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
                 fine_candidates.append(n)
     else:
         fine_candidates = [n for n in cleaned if 7 <= len(n) <= 10 and n != best_plate]
+        lines = ocr_text.splitlines()
         labeled_notice_candidates: list[str] = []
-        for idx, line in enumerate(ocr_text.splitlines()):
+        for idx, line in enumerate(lines):
             if not any(_line_has_keyword(line, kw) for kw in _LEGACY_FINE_LABEL_KEYWORDS):
                 continue
             scope_start = max(0, idx - 1)
-            scope_end = min(len(ocr_text.splitlines()), idx + 2)
-            scope = "\n".join(ocr_text.splitlines()[scope_start:scope_end])
+            scope_end = min(len(lines), idx + 2)
+            scope = "\n".join(lines[scope_start:scope_end])
             for token in re.findall(r"\d[\d \t\-./,:]{4,16}\d", scope):
                 candidate = "".join(ch for ch in token if ch.isdigit())
                 if len(candidate) not in (7, 8, 9, 10) or candidate == best_plate:
@@ -687,8 +790,35 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
                 if near_tz or candidate in date_like_values:
                     continue
                 labeled_notice_candidates.append(candidate)
+
+        municipal_top_candidates: list[str] = []
+        municipal_anchor_lines = [
+            idx for idx, line in enumerate(lines)
+            if any(_line_has_keyword(line, kw) for kw in _MUNICIPAL_NOTICE_ANCHORS)
+        ]
+        if len(municipal_anchor_lines) >= 2:
+            scan_end = min(len(lines), min(municipal_anchor_lines) + 1)
+            for idx, line in enumerate(lines[:scan_end]):
+                for token in re.findall(r"\d[\d \t\-./,:]{4,16}\d", line):
+                    candidate = "".join(ch for ch in token if ch.isdigit())
+                    if len(candidate) not in (7, 8, 9, 10) or candidate == best_plate:
+                        continue
+                    nearby_lines = lines[max(0, idx - 1): idx + 1]
+                    if any(
+                        any(_line_has_keyword(near_line, kw) for kw in PLATE_KEYWORDS)
+                        for near_line in nearby_lines
+                    ):
+                        continue
+                    if candidate in date_like_values:
+                        continue
+                    municipal_top_candidates.append(candidate)
+            municipal_top_candidate_set = set(municipal_top_candidates)
         if labeled_notice_candidates:
             fine_candidates = labeled_notice_candidates + fine_candidates
+            priority_fine_candidates.update(labeled_notice_candidates)
+        if municipal_top_candidates:
+            fine_candidates = municipal_top_candidates + fine_candidates
+            priority_fine_candidates.update(municipal_top_candidates)
 
     if debug:
         for n in sorted(set(fine_candidates), key=lambda x: _candidate_score(x, counts, "fine", ocr_text), reverse=True)[:5]:
@@ -699,6 +829,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         max(
             fine_candidates,
             key=lambda n: (
+                n in priority_fine_candidates,
                 n not in date_like_values,
                 _candidate_score(n, counts, "fine", ocr_text),
             ),
@@ -707,8 +838,18 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         else None
     )
 
+    logger.info(
+        "Fine OCR candidates template=%s decision_markers=%s plate=%s fine=%s",
+        template,
+        decision_markers[:3],
+        _format_candidate_summary(plate_candidates, counts, "plate", ocr_text),
+        _format_candidate_summary(fine_candidates, counts, "fine", ocr_text),
+    )
+
     # Context requirement for fine
     fine_ctx = _context_score(ocr_text, best_fine_pre or "", FINE_KEYWORDS) if best_fine_pre else 0
+    if best_fine_pre and best_fine_pre in municipal_top_candidate_set:
+        fine_ctx = max(fine_ctx, 2)
     if best_fine_pre and fine_ctx == 0:
         if debug:
             logger.debug("  fine %s rejected: no context proximity", best_fine_pre)
@@ -798,6 +939,17 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
             amount_ctx,
             amount_confident,
         )
+
+    logger.info(
+        "Fine OCR selected template=%s plate=%s fine=%s amount=%s plate_ctx=%d fine_ctx=%d amount_ctx=%d",
+        template,
+        best_plate,
+        best_fine,
+        best_amount,
+        plate_ctx,
+        fine_ctx,
+        amount_ctx,
+    )
 
     return {
         "plate": best_plate,

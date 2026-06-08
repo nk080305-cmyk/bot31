@@ -249,6 +249,58 @@ def test_extract_plate_and_fine_candidates_type2_notice_routes_anchor_and_keeps_
     assert result["fine"] is None
 
 
+def test_detect_fine_template_decision_notice_markers_route_anchor_based():
+    ocr_text = (
+        "הודעה על החלטה להטיל קנס\n"
+        "תעודת עובד הציבור\n"
+        "תאור העובדות המהוות\n"
+    )
+    template, reason = _detect_fine_template_with_reason(ocr_text)
+    assert template == "anchor_based"
+    assert "decision_notice_markers" in reason
+
+
+def test_extract_plate_and_fine_candidates_decision_notice_prefers_labeled_plate():
+    ocr_text = (
+        "הודעה על החלטה להטיל קנס\n"
+        "תעודת עובד הציבור\n"
+        "מספר רכב: 7654321\n"
+        "תאור העובדות המהוות\n"
+        "ברכב אחר הופיע 1234567 בגוף הטקסט\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "7654321 1234567")
+    assert result["plate"] == "7654321"
+
+
+def test_extract_plate_and_fine_candidates_municipal_template_recovers_fine_number():
+    ocr_text = (
+        "הודעת תשלום קנס\n"
+        "19052 19\n"
+        "מספר רכב\n"
+        "6486471\n"
+        "יצרן רכב\n"
+        "גובה הקנס בט\"ח: 100\n"
+        "הערות הפקח\n"
+        "עבירה - 133\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "1905219 6486471 100 133")
+    assert result["fine"] == "1905219"
+
+
+def test_extract_plate_and_fine_candidates_logs_candidates_and_selected(caplog):
+    import logging
+    ocr_text = (
+        "הודעה על החלטה להטיל קנס\n"
+        "תעודת עובד הציבור\n"
+        "מספר רכב: 7654321\n"
+        "מספר הודעת תשלום קנס: 1234567890\n"
+    )
+    with caplog.at_level(logging.INFO, logger="bot.ocr"):
+        extract_plate_and_fine_candidates(ocr_text, "7654321 1234567890")
+    assert any("Fine OCR candidates template=" in r.message for r in caplog.records)
+    assert any("Fine OCR selected template=" in r.message for r in caplog.records)
+
+
 def test_multi_preprocess_flag_defaults_to_off(monkeypatch):
     monkeypatch.delenv("OCR_MULTI_VARIANTS", raising=False)
     monkeypatch.delenv("OCR_MULTI_PREPROCESS", raising=False)
