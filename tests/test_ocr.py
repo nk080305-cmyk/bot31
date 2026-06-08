@@ -3,6 +3,8 @@ import pytest
 
 from bot.ocr import (
     _context_score,
+    _detect_fine_template_with_reason,
+    _detect_type2_token_proximity,
     _is_multi_preprocess_enabled,
     extract_plate_and_fine_candidates,
     mask_secret,
@@ -287,3 +289,101 @@ def test_mask_secret_one_over_boundary():
     val = "a" * 12  # 7 + 4 + 1
     result = mask_secret(val)
     assert result == "aaaaaaa...aaaa"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the two real production notice types
+# ---------------------------------------------------------------------------
+
+def test_detect_type2_token_proximity_finds_noisy_label():
+    """Token-proximity detection routes noisy OCR with fragmented label to anchor_based."""
+    # Simulate OCR noise where the full phrase "הודעת תשלום קנס" is broken
+    # but all three token roots are present within 150 chars.
+    noisy_text = "הודעת  tsh1um  קנס\n"  # תשלום garbled as ASCII noise
+    # This should NOT match because תשלו root is absent
+    assert _detect_type2_token_proximity(noisy_text) is None
+
+    # When all three roots are present, proximity detection should trigger
+    clean_tokens = "הודע blah תשלו more קנס\n"
+    assert _detect_type2_token_proximity(clean_tokens) is not None
+
+
+def test_detect_type2_token_proximity_not_triggered_without_all_tokens():
+    """Partial token presence must not trigger type-2 detection."""
+    only_two = "הודעת תשלום\nsome other text"
+    assert _detect_type2_token_proximity(only_two) is None
+
+    only_one = "קנס 2266111"
+    assert _detect_type2_token_proximity(only_one) is None
+
+
+def test_detect_fine_template_noisy_type2_routes_anchor_based():
+    """Even with OCR-corrupted label, type-2 token proximity triggers anchor_based routing.
+
+    Real-world: OCR score ~440 can mangle 'הודעת תשלום קנס' into separate
+    fragments that the exact phrase regex misses but token proximity catches.
+    """
+    # Simulate what OCR might produce for a type-2 notice - roots present but
+    # label split across tokens with noise characters.
+    noisy_type2_ocr = (
+        "הודע   תשלו  קנס\n"
+        "מספר רכב: 2266111\n"
+        "תאריך: 15/05/2076\n"
+        "סכום: 2076\n"
+    )
+    template, reason = _detect_fine_template_with_reason(noisy_type2_ocr)
+    assert template == "anchor_based", f"Expected anchor_based, got {template} ({reason})"
+    assert "token_proximity" in reason
+
+
+def test_detect_fine_template_noisy_type2_not_triggered_with_legacy_label():
+    """Token proximity must NOT override if a legacy label is also present."""
+    mixed_text = (
+        "הודע תשלו קנס\n"
+        "מספר דוח: 51903219\n"  # legacy label present → must stay legacy
+    )
+    template, reason = _detect_fine_template_with_reason(mixed_text)
+    assert template == "legacy"
+
+
+def test_extract_plate_and_fine_candidates_noisy_type2_recovers_plate(caplog):
+    """Plate 2266111 is recovered even when OCR-corrupted type-2 label uses token routing.
+
+    Regression for the production case where plate=None was returned because:
+    - Template was wrongly routed to legacy (due to corrupted 'הודעת תשלום קנס')
+    - Plate was found but not plate_confident, so reconciliation ignored it.
+    """
+    import logging
+    # Tokens present but phrase partially garbled → should route anchor_based.
+    # Real type-2 notices do NOT have "מספר הודעה" / "מספר דוח" labels, only
+    # the "הודעת תשלום קנס" family.
+    noisy_ocr = (
+        "הודע תשלו קנס\n"
+        "מספר רכב: 2266111\n"
+        "תאריך: 15/05/2076\n"
+        "סכום לתשלום: 2076\n"
+        "4030573\n"
+    )
+    with caplog.at_level(logging.INFO, logger="bot.ocr"):
+        result = extract_plate_and_fine_candidates(noisy_ocr, "2266111 4030573 15052076 2076")
+    assert any("template_detected=anchor_based" in r.message for r in caplog.records), (
+        "Should route to anchor_based via token proximity"
+    )
+    assert result["plate"] == "2266111", (
+        f"Expected plate=2266111, got plate={result['plate']}"
+    )
+    # In anchor_based mode, fine candidates are restricted to 10-11 digits,
+    # so 7-digit 4030573 must not win.
+    assert result["fine"] != "4030573", (
+        "7-digit number should not be selected as fine in anchor_based mode"
+    )
+
+
+def test_extract_plate_and_fine_candidates_returns_plate_ctx():
+    """plate_ctx is included in the returned dict for use in reconciliation."""
+    ocr_text = "מספר רכב: 2266111\nסכום: 133\n"
+    result = extract_plate_and_fine_candidates(ocr_text, "2266111 133")
+    assert "plate_ctx" in result, "plate_ctx must be returned for reconciliation"
+    # Number on the same line as a plate keyword → context score should be > 0
+    assert result["plate_ctx"] > 0
+

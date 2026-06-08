@@ -149,3 +149,115 @@ def test_choose_final_plate_candidate_picks_valid_over_invalid():
     assert selected == "1234567"
     assert source == "ocr"
     assert reason == "ocr_format_preferred"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the two real production fine notice types
+# ---------------------------------------------------------------------------
+
+def test_ensure_fine_number_calls_focused_for_moderate_confidence():
+    """Focused extractor is called when AI confidence is moderate (< 0.75).
+
+    Regression for legacy notice type: AI returns a plausible but wrong fine
+    number with confidence below the high-confidence threshold.  The focused
+    extractor (with a targeted prompt) should be given a chance to correct it.
+    """
+    called = []
+
+    async def fake_focused(_ocr, _num):
+        called.append(True)
+        return {"fine_number": "51903219", "confidence": 0.92}
+
+    # AI returned a "valid" 7-digit fine number but with only moderate confidence
+    details = {"fine_number": {"value": "4030573", "confidence": 0.65}}
+    updated = asyncio.run(
+        _ensure_fine_number(
+            details,
+            "הודעת תשלום קנס\nסכום: 2076",
+            "",
+            focused_extractor=fake_focused,
+        )
+    )
+    assert called, "focused extractor must be called when confidence < 0.75"
+    assert updated["fine_number"]["value"] == "51903219"
+    assert updated["fine_number"]["confidence"] >= 0.9
+
+
+def test_ensure_fine_number_skips_focused_for_high_confidence():
+    """Focused extractor is NOT called when AI confidence is already >= 0.75."""
+    called = []
+
+    async def fake_focused(_ocr, _num):
+        called.append(True)
+        return {"fine_number": "00000000", "confidence": 0.99}
+
+    details = {"fine_number": {"value": "51903219", "confidence": 0.85}}
+    updated = asyncio.run(
+        _ensure_fine_number(
+            details,
+            "מספר דוח: 51903219",
+            "",
+            focused_extractor=fake_focused,
+        )
+    )
+    assert not called, "focused extractor must NOT be called when confidence >= 0.75"
+    assert updated["fine_number"]["value"] == "51903219"
+
+
+def test_reconcile_uses_plate_with_strong_anchor_ctx_even_if_not_confident():
+    """Plate with strong anchor context is used even without plate_confident flag.
+
+    Regression for second-type notice: plate 2266111 appears only once (not
+    confident by count) but sits directly next to a plate keyword.  The
+    reconciliation should use it via plate_ctx >= 4.
+    """
+    from bot.handlers.upload import _reconcile_vehicle_plate
+
+    details = {}
+    heuristic_candidates = {
+        "plate": "2266111",
+        "fine": None,
+        "amount": "2076",
+        "plate_confident": False,   # count < 2, so not confident
+        "fine_confident": False,
+        "amount_confident": True,
+        "plate_ctx": 8,             # same-line label match → strong anchor
+    }
+    vision_fields: dict = {}
+    result = _reconcile_vehicle_plate(
+        details,
+        heuristic_candidates,
+        vision_fields,
+        user_id=1,
+        case_id="test-case",
+    )
+    assert result.get("vehicle_plate", {}).get("value") == "2266111", (
+        "Plate with plate_ctx>=4 should be selected even when plate_confident=False"
+    )
+
+
+def test_reconcile_ignores_plate_with_no_anchor_ctx_and_not_confident():
+    """Plate with zero anchor context and not confident stays ignored."""
+    from bot.handlers.upload import _reconcile_vehicle_plate
+
+    details = {}
+    heuristic_candidates = {
+        "plate": "2266111",
+        "fine": None,
+        "amount": None,
+        "plate_confident": False,
+        "fine_confident": False,
+        "amount_confident": False,
+        "plate_ctx": 0,  # no anchor context
+    }
+    vision_fields: dict = {}
+    result = _reconcile_vehicle_plate(
+        details,
+        heuristic_candidates,
+        vision_fields,
+        user_id=1,
+        case_id="test-case",
+    )
+    # Without context or confidence, plate should not be applied
+    assert "vehicle_plate" not in result or result.get("vehicle_plate", {}).get("value") is None
+

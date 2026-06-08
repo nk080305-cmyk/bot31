@@ -75,7 +75,10 @@ async def _ensure_fine_number(
     raw_confidence = field.get("confidence", 0.0)
     confidence = float(raw_confidence) if isinstance(raw_confidence, (float, int)) else 0.0
 
-    if is_valid_fine_number(current_value):
+    # Only skip the focused extractor when the primary AI extraction is
+    # already highly confident (>= 0.75).  For moderate-confidence values the
+    # focused call may recover a better candidate (e.g. from numeric OCR).
+    if is_valid_fine_number(current_value) and confidence >= 0.75:
         field["value"] = current_value
         field["confidence"] = confidence
         return details
@@ -83,7 +86,7 @@ async def _ensure_fine_number(
     candidates = find_fine_number_candidates(f"{ocr_text}\n{numeric_ocr_text}")
     heuristic_value = pick_best_fine_number(candidates)
 
-    needs_focused = not heuristic_value or confidence < 0.6
+    needs_focused = not heuristic_value or confidence < 0.75
     if needs_focused:
         focused_result = await focused_extractor(ocr_text, numeric_ocr_text)
         focused_value = normalize_fine_number(
@@ -222,7 +225,11 @@ def _reconcile_vehicle_plate(
 
     vision_plate = "".join(ch for ch in str(vision_fields.get("license_plate") or "") if ch.isdigit())
     ocr_plate = ""
-    if heuristic_candidates.get("plate_confident"):
+    # Use OCR plate when it is confident, or when it has a strong labeled anchor
+    # context (plate appears on the same line as a plate keyword, ctx >= 4) even
+    # if it occurred only once in the document.
+    plate_anchor_ctx = int(heuristic_candidates.get("plate_ctx") or 0)
+    if heuristic_candidates.get("plate_confident") or plate_anchor_ctx >= 4:
         ocr_plate = "".join(ch for ch in str(heuristic_candidates.get("plate") or "") if ch.isdigit())
 
     selected_plate, selected_source, decision_reason = _choose_final_plate_candidate(

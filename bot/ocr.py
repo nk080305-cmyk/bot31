@@ -63,6 +63,13 @@ _TZ_LABEL_RE = re.compile(r"תעודת%sזהות" % _FLEX_SEPARATORS, re.IGNOREC
 _DATE_TOKEN_RE = re.compile(r"(?<!\d)\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?!\d)")
 _LEGACY_TEMPLATE = "legacy"
 _ANCHOR_BASED_TEMPLATE = "anchor_based"
+
+# Noise-tolerant token-level regexes for type-2 detection under OCR noise.
+# Each regex matches the root/core of its Hebrew word to tolerate garbling.
+_TYPE2_TOKEN_HODAA_RE = re.compile(r"הודע", re.IGNORECASE)    # root of הודעת
+_TYPE2_TOKEN_TASHLUM_RE = re.compile(r"תשלו", re.IGNORECASE)  # root of תשלום
+_TYPE2_TOKEN_KNAS_RE = re.compile(r"קנס", re.IGNORECASE)
+_TYPE2_NOISY_ANCHOR_WINDOW = 150  # characters around a token to search for peers
 _LEGACY_FINE_LABEL_KEYWORDS = [
     "מספר הודעת תשלום קנס",
     "הודעת תשלום קנס",
@@ -442,12 +449,36 @@ def _amount_candidate_score(
     )
 
 
+def _detect_type2_token_proximity(text: str) -> str | None:
+    """Return a token fragment if type-2 key tokens appear near each other.
+
+    Checks whether the root fragments of הודעת, תשלום, and קנס all appear
+    within *_TYPE2_NOISY_ANCHOR_WINDOW* characters of each other, tolerating
+    OCR garbling of the full label phrase.  Returns a short description of the
+    matching fragment for use in log messages, or ``None`` if not found.
+    """
+    for match in _TYPE2_TOKEN_HODAA_RE.finditer(text):
+        center = match.start()
+        chunk = text[max(0, center - _TYPE2_NOISY_ANCHOR_WINDOW): center + _TYPE2_NOISY_ANCHOR_WINDOW]
+        if _TYPE2_TOKEN_TASHLUM_RE.search(chunk) and _TYPE2_TOKEN_KNAS_RE.search(chunk):
+            fragment = text[center: center + min(8, len(text) - center)].strip()
+            return fragment[:8] if fragment else "הודע+תשלו+קנס"
+    return None
+
+
 def _detect_fine_template_with_reason(ocr_text: str) -> Tuple[str, str]:
     text = ocr_text or ""
     if _TYPE2_FINE_LABEL_RE.search(text):
         return _ANCHOR_BASED_TEMPLATE, "explicit_type2_label"
     if _TYPE2_NOTICE_LABEL_RE.search(text) and not _LEGACY_NOTICE_LABEL_RE.search(text):
         return _ANCHOR_BASED_TEMPLATE, "type2_notice_without_legacy_notice_label"
+    # Noise-tolerant fallback: key type-2 tokens appear near each other even
+    # though the full label phrase was garbled by OCR noise.  Only triggers when
+    # no legacy-specific label (מספר דוח / מספר הודעה) is present.
+    if not _LEGACY_NOTICE_LABEL_RE.search(text):
+        noisy_fragment = _detect_type2_token_proximity(text)
+        if noisy_fragment:
+            return _ANCHOR_BASED_TEMPLATE, "type2_token_proximity"
     return _LEGACY_TEMPLATE, "fallback_legacy_notice"
 
 
@@ -750,6 +781,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         "plate_confident": plate_confident,
         "fine_confident": fine_confident,
         "amount_confident": amount_confident,
+        "plate_ctx": plate_ctx,
     }
 
 
