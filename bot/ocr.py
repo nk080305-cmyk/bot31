@@ -41,7 +41,7 @@ DECISION_NOTICE_MARKERS = [
     "תאור העובדות המהוות",
 ]
 _MUNICIPAL_NOTICE_ANCHORS = ["מספר רכב", "יצרן רכב", "גובה הקנס", "הערות הפקח"]
-_DECISION_PLATE_KEYWORDS = ["מספר רכב", "רכב פרטי", "רכב"]
+_DECISION_PLATE_KEYWORDS = ["מספר רכב", "מס רכב", "מס' רכב", "לוחית רישוי", "לוחית"]
 NARRATIVE_MARKERS = [
     "אני החתום מטה",
     "סיבות",
@@ -440,15 +440,57 @@ def _matched_keywords(text: str, keywords: list[str]) -> list[str]:
     return [kw for kw in keywords if _text_has_keyword(text, kw)]
 
 
+def _is_municipal_anchor_line(line: str) -> bool:
+    compact = re.sub(r"\s+", "", line or "")
+    if any(_line_has_keyword(line, kw) for kw in _MUNICIPAL_NOTICE_ANCHORS):
+        return True
+    if "יצרן" in compact and "רכב" in compact:
+        return True
+    if "גובה" in compact and ("קנס" in compact or "קנם" in compact):
+        return True
+    if "הערות" in compact and "פקח" in compact:
+        return True
+    # OCR noise-tolerant fallback for "מספר רכב" (e.g. מטפר רבב)
+    if "רבב" in compact or ("מספר" in compact and "רכב" in compact):
+        return True
+    return False
+
+
+def _municipal_anchor_lines(text: str) -> list[int]:
+    return [idx for idx, line in enumerate(text.splitlines()) if _is_municipal_anchor_line(line)]
+
+
+def _looks_like_date_digits(value: str) -> bool:
+    if len(value) != 8 or not value.isdigit():
+        return False
+    first4 = int(value[:4])
+    last4 = int(value[4:])
+    month_mid = int(value[2:4])
+    month_tail = int(value[4:6])
+    day_head = int(value[:2])
+    day_mid = int(value[2:4])
+    # YYYYMMDD
+    if 1900 <= first4 <= 2100 and 1 <= month_tail <= 12:
+        return True
+    # DDMMYYYY
+    if 1900 <= last4 <= 2100 and 1 <= month_mid <= 12 and 1 <= day_head <= 31:
+        return True
+    # MMDDYYYY
+    if 1900 <= last4 <= 2100 and 1 <= day_head <= 12 and 1 <= day_mid <= 31:
+        return True
+    return False
+
+
+def _line_has_legacy_fine_label(line: str) -> bool:
+    if any(_line_has_keyword(line, kw) for kw in _LEGACY_FINE_LABEL_KEYWORDS):
+        return True
+    compact = re.sub(r"\s+", "", line or "")
+    return bool(re.search(r"להודע[הו]?", compact))
+
+
 def _decision_plate_context_score(text: str, candidate: str) -> int:
     lines = text.splitlines()
     if not lines:
-        return 0
-    marker_lines = [
-        idx for idx, line in enumerate(lines)
-        if any(_line_has_keyword(line, marker) for marker in DECISION_NOTICE_MARKERS)
-    ]
-    if not marker_lines:
         return 0
     number_re = _digits_pattern(candidate)
     score = 0
@@ -456,9 +498,11 @@ def _decision_plate_context_score(text: str, candidate: str) -> int:
         if not number_re.search(line):
             continue
         if any(_line_has_keyword(line, kw) for kw in _DECISION_PLATE_KEYWORDS):
+            score += 6
+            continue
+        neighbor_slice = lines[max(0, idx - 1): min(len(lines), idx + 2)]
+        if any(any(_line_has_keyword(neighbor, kw) for kw in _DECISION_PLATE_KEYWORDS) for neighbor in neighbor_slice):
             score += 4
-        if any(abs(idx - marker_idx) <= 8 for marker_idx in marker_lines):
-            score += 2
     return score
 
 
@@ -535,14 +579,17 @@ def _detect_fine_template_with_reason(ocr_text: str) -> Tuple[str, str]:
     legacy_label_present = bool(_LEGACY_NOTICE_LABEL_RE.search(text))
     decision_markers = _matched_keywords(text, DECISION_NOTICE_MARKERS)
     municipal_markers = _matched_keywords(text, _MUNICIPAL_NOTICE_ANCHORS)
+    municipal_anchor_lines = _municipal_anchor_lines(text)
     if decision_markers:
         joined_markers = ",".join(decision_markers[:3])
         return _ANCHOR_BASED_TEMPLATE, f"decision_notice_markers:{joined_markers}"
     if _TYPE2_FINE_LABEL_RE.search(text):
         return _ANCHOR_BASED_TEMPLATE, "explicit_type2_label"
     if _TYPE2_NOTICE_LABEL_RE.search(text):
-        if len(municipal_markers) >= 2:
+        if len(municipal_markers) >= 2 or len(municipal_anchor_lines) >= 2:
             joined_markers = ",".join(municipal_markers[:3])
+            if not joined_markers:
+                joined_markers = "noise_tolerant_municipal_anchors"
             return (
                 _LEGACY_TEMPLATE,
                 f"fallback_legacy_notice:municipal_notice_markers:{joined_markers}",
@@ -653,8 +700,17 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         else:
             logger.debug("  plate anchor hits: none")
 
+    date_like_values = {
+        "".join(ch for ch in m.group() if ch.isdigit())
+        for m in _DATE_TOKEN_RE.finditer(full_text)
+    }
+
     # --- Plate selection ---------------------------------------------------
     plate_candidates = [n for n in cleaned if len(n) in (7, 8)]
+    if template == _ANCHOR_BASED_TEMPLATE and decision_markers:
+        plate_candidates = [
+            n for n in plate_candidates if n not in date_like_values and not _looks_like_date_digits(n)
+        ]
     plate_profiles = (
         {n: _plate_candidate_profile(ocr_text, n) for n in set(plate_candidates)}
         if template == _ANCHOR_BASED_TEMPLATE
@@ -743,11 +799,6 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     else:
         best_plate = best_plate_pre
 
-    date_like_values = {
-        "".join(ch for ch in m.group() if ch.isdigit())
-        for m in _DATE_TOKEN_RE.finditer(full_text)
-    }
-
     # --- Fine selection ----------------------------------------------------
     # Exclude best_plate (the accepted plate, after context check) to prevent
     # the same number occupying both slots.  If best_plate was rejected (None),
@@ -773,7 +824,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         lines = ocr_text.splitlines()
         labeled_notice_candidates: list[str] = []
         for idx, line in enumerate(lines):
-            if not any(_line_has_keyword(line, kw) for kw in _LEGACY_FINE_LABEL_KEYWORDS):
+            if not _line_has_legacy_fine_label(line):
                 continue
             scope_start = max(0, idx - 1)
             scope_end = min(len(lines), idx + 2)
@@ -792,10 +843,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
                 labeled_notice_candidates.append(candidate)
 
         municipal_top_candidates: list[str] = []
-        municipal_anchor_lines = [
-            idx for idx, line in enumerate(lines)
-            if any(_line_has_keyword(line, kw) for kw in _MUNICIPAL_NOTICE_ANCHORS)
-        ]
+        municipal_anchor_lines = _municipal_anchor_lines(ocr_text)
         if len(municipal_anchor_lines) >= 2:
             scan_end = min(len(lines), min(municipal_anchor_lines) + 1)
             for idx, line in enumerate(lines[:scan_end]):

@@ -287,6 +287,32 @@ def test_extract_plate_and_fine_candidates_municipal_template_recovers_fine_numb
     assert result["fine"] == "1905219"
 
 
+def test_detect_fine_template_noisy_municipal_anchors_stay_legacy():
+    ocr_text = (
+        "הודעת תשלום קנס\n"
+        "מטפר רבב\n"
+        "יצרן רכב\n"
+        "גובה הקנם בט\"ח: 100\n"
+        "הערות הפקח\n"
+    )
+    template, reason = _detect_fine_template_with_reason(ocr_text)
+    assert template == "legacy"
+    assert "municipal_notice_markers" in reason
+
+
+def test_extract_plate_and_fine_candidates_decision_notice_ignores_date_numbers_for_plate():
+    ocr_text = (
+        "הודעה על החלטה להטיל קנס\n"
+        "תעודת עובד הציבור\n"
+        "תאריך: 15/05/2026\n"
+        "מספר רכב\n"
+        "2266111\n"
+        "תאור העובדות המהוות\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "15052026 2266111")
+    assert result["plate"] == "2266111"
+
+
 def test_extract_plate_and_fine_candidates_logs_candidates_and_selected(caplog):
     import logging
     ocr_text = (
