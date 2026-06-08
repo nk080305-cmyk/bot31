@@ -53,6 +53,15 @@ _TYPE2_FINE_LABEL_RE = re.compile(
     r"מספר[ \t\-./,:_]*הודעת[ \t\-./,:_]*תשלום[ \t\-./,:_]*קנס",
     re.IGNORECASE,
 )
+_EXTRACTED_FIELD_KEYS = (
+    "fine_number",
+    "fine_date",
+    "fine_amount",
+    "violation",
+    "vehicle_plate",
+    "location",
+    "payment_deadline",
+)
 
 
 def _digits_only(text: str) -> str:
@@ -194,17 +203,17 @@ _FINE_NUMBER_ONLY_PROMPT = """\
 Extract ONLY the fine/ticket number (מספר דוח) from OCR text.
 
 Return JSON object with exactly:
-{
+{{
   "fine_number": string or null,
   "confidence": number between 0.0 and 1.0
-}
+}}
 
 Rules:
 - fine_number should contain digits only.
 - If "מספר הודעת תשלום קנס" is present, fine_number should be 10-11 digits.
 - Do not return 9-digit "תעודת זהות" as fine_number.
 - Use both OCR blocks if provided.
-- If not found, return {"fine_number": null, "confidence": 0.0}.
+- If not found, return {{"fine_number": null, "confidence": 0.0}}.
 
 GENERAL OCR:
 \"\"\"
@@ -247,6 +256,50 @@ _APPEAL_PROMPT = """\
 def normalize_license_plate(value: str | None) -> str:
     """Return a digits-only normalized vehicle plate."""
     return _digits_only(value or "")
+
+
+def _coerce_confidence(value: Any) -> float:
+    return float(value) if isinstance(value, (float, int)) else 0.0
+
+
+def _normalize_extracted_field(field_name: str, payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, dict):
+        value = payload.get("value")
+        confidence = _coerce_confidence(payload.get("confidence", 0.0))
+    else:
+        value = payload
+        confidence = 0.0
+
+    if field_name == "fine_number":
+        normalized_value = normalize_fine_number(
+            str(value or ""), aggressive=True
+        ) or None
+    elif field_name == "vehicle_plate":
+        normalized_value = normalize_license_plate(str(value or "")) or None
+    else:
+        normalized_value = str(value).strip() if value not in (None, "") else None
+
+    normalized = {
+        "value": normalized_value,
+        "confidence": confidence,
+    }
+    if isinstance(payload, dict) and payload.get("manual"):
+        normalized["manual"] = True
+    return normalized
+
+
+def _coerce_extracted_details(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+
+    normalized = {
+        field_name: _normalize_extracted_field(field_name, payload.get(field_name))
+        for field_name in _EXTRACTED_FIELD_KEYS
+    }
+    for key, value in payload.items():
+        if key not in normalized:
+            normalized[key] = value
+    return normalized
 
 
 def _extract_response_text(response: Any) -> str:
@@ -378,12 +431,8 @@ async def extract_fine_details(
                 "content": response.choices[0].message.content,
             },
         )
-        result: Dict[str, Any] = json.loads(response.choices[0].message.content)
-        fine_number_data = result.get("fine_number")
-        if isinstance(fine_number_data, dict):
-            value = fine_number_data.get("value")
-            if value:
-                fine_number_data["value"] = normalize_fine_number(str(value), aggressive=True)
+        result = _coerce_extracted_details(json.loads(response.choices[0].message.content))
+        fine_number_data = result["fine_number"]
 
         # --- Post-validation: heuristic fallbacks for vehicle_plate / fine_number ---
         try:
