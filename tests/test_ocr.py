@@ -226,6 +226,11 @@ def test_extract_plate_and_fine_candidates_legacy_notice_anchor_extracts_fine_nu
     with caplog.at_level(logging.INFO, logger="bot.ocr"):
         result = extract_plate_and_fine_candidates(ocr_text, "51903219 1234567 15052076 2076")
     assert any("template_detected=legacy" in r.message for r in caplog.records)
+    assert any(
+        "reason=fallback_legacy_notice:type2_notice_with_legacy_label_no_narrative_marker"
+        in r.message
+        for r in caplog.records
+    )
     assert result["fine"] == "51903219"
 
 
@@ -344,6 +349,19 @@ def test_detect_fine_template_noisy_type2_not_triggered_with_legacy_label():
     )
     template, reason = _detect_fine_template_with_reason(mixed_text)
     assert template == "legacy"
+    assert "blocks_type2_token_proximity" in reason
+
+
+def test_detect_fine_template_type2_notice_with_legacy_label_and_narrative_routes_anchor():
+    mixed_text = (
+        "הודעת תשלום קנס\n"
+        "אני החתום מטה מציין את פרטי המקרה\n"
+        "מספר הודעה: 4030573\n"
+        "מספר רכב: 2266111\n"
+    )
+    template, reason = _detect_fine_template_with_reason(mixed_text)
+    assert template == "anchor_based"
+    assert "narrative_marker" in reason
 
 
 def test_extract_plate_and_fine_candidates_noisy_type2_recovers_plate(caplog):
@@ -386,4 +404,3 @@ def test_extract_plate_and_fine_candidates_returns_plate_ctx():
     assert "plate_ctx" in result, "plate_ctx must be returned for reconciliation"
     # Number on the same line as a plate keyword → context score should be > 0
     assert result["plate_ctx"] > 0
-

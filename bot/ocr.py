@@ -466,20 +466,45 @@ def _detect_type2_token_proximity(text: str) -> str | None:
     return None
 
 
+def _find_first_marker(text: str, markers: list[str]) -> str | None:
+    for marker in markers:
+        if marker and marker in text:
+            return marker
+    return None
+
+
 def _detect_fine_template_with_reason(ocr_text: str) -> Tuple[str, str]:
     text = ocr_text or ""
+    legacy_label_present = bool(_LEGACY_NOTICE_LABEL_RE.search(text))
     if _TYPE2_FINE_LABEL_RE.search(text):
         return _ANCHOR_BASED_TEMPLATE, "explicit_type2_label"
-    if _TYPE2_NOTICE_LABEL_RE.search(text) and not _LEGACY_NOTICE_LABEL_RE.search(text):
-        return _ANCHOR_BASED_TEMPLATE, "type2_notice_without_legacy_notice_label"
+    if _TYPE2_NOTICE_LABEL_RE.search(text):
+        narrative_marker = _find_first_marker(text, NARRATIVE_MARKERS)
+        if narrative_marker:
+            return (
+                _ANCHOR_BASED_TEMPLATE,
+                f"type2_notice_with_narrative_marker:{narrative_marker}",
+            )
+        if not legacy_label_present:
+            return _ANCHOR_BASED_TEMPLATE, "type2_notice_without_legacy_notice_label"
+        return (
+            _LEGACY_TEMPLATE,
+            "fallback_legacy_notice:type2_notice_with_legacy_label_no_narrative_marker",
+        )
     # Noise-tolerant fallback: key type-2 tokens appear near each other even
     # though the full label phrase was garbled by OCR noise.  Only triggers when
     # no legacy-specific label (מספר דוח / מספר הודעה) is present.
-    if not _LEGACY_NOTICE_LABEL_RE.search(text):
-        noisy_fragment = _detect_type2_token_proximity(text)
-        if noisy_fragment:
-            return _ANCHOR_BASED_TEMPLATE, "type2_token_proximity"
-    return _LEGACY_TEMPLATE, "fallback_legacy_notice"
+    noisy_fragment = _detect_type2_token_proximity(text)
+    if noisy_fragment:
+        if not legacy_label_present:
+            return _ANCHOR_BASED_TEMPLATE, f"type2_token_proximity:{noisy_fragment}"
+        return (
+            _LEGACY_TEMPLATE,
+            f"fallback_legacy_notice:legacy_notice_label_blocks_type2_token_proximity:{noisy_fragment}",
+        )
+    if legacy_label_present:
+        return _LEGACY_TEMPLATE, "fallback_legacy_notice:legacy_notice_label"
+    return _LEGACY_TEMPLATE, "fallback_legacy_notice:no_type2_markers"
 
 
 def _detect_fine_template(ocr_text: str) -> str:

@@ -244,6 +244,36 @@ def test_extract_vision_fields_returns_empty_on_invalid_json(monkeypatch, tmp_pa
     assert result == {}
 
 
+def test_extract_fine_number_only_handles_literal_json_prompt(monkeypatch):
+    import bot.openai_client as mod
+
+    monkeypatch.setattr(mod, "_client", _DummyClient('{"fine_number":"51-9032-19","confidence":0.91}'))
+
+    result = asyncio.run(extract_fine_number_only("מספר דוח 51-9032-19", ""))
+
+    assert result == {"fine_number": "51903219", "confidence": 0.91}
+
+
+def test_extract_fine_details_coerces_missing_and_scalar_fields(monkeypatch):
+    import bot.openai_client as mod
+
+    llm_payload = json.dumps(
+        {
+            "fine_number": None,
+            "vehicle_plate": "12-345-678",
+        },
+        ensure_ascii=False,
+    )
+    monkeypatch.setattr(mod, "_client", _DummyClient(llm_payload))
+
+    result = asyncio.run(extract_fine_details("מספר רכב: 12-345-678", "12 345 678"))
+
+    assert result["fine_number"] == {"value": None, "confidence": 0.0}
+    assert result["vehicle_plate"]["value"] == "12345678"
+    assert result["vehicle_plate"]["confidence"] == 0.0
+    assert result["fine_date"] == {"value": None, "confidence": 0.0}
+
+
 def test_extract_fine_details_type2_prefers_10_11_and_plate_anchor(monkeypatch):
     import bot.openai_client as mod
 
