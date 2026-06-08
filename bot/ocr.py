@@ -51,6 +51,8 @@ _TYPE2_FINE_LABEL_RE = re.compile(
 )
 _TZ_LABEL_RE = re.compile(r"תעודת%sזהות" % _FLEX_SEPARATORS, re.IGNORECASE)
 _DATE_TOKEN_RE = re.compile(r"(?<!\d)\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?!\d)")
+_LEGACY_TEMPLATE = "legacy"
+_ANCHOR_BASED_TEMPLATE = "anchor_based"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -424,6 +426,17 @@ def _amount_candidate_score(
     )
 
 
+def _detect_fine_template(ocr_text: str) -> str:
+    """Choose extraction template from stable OCR notice labels.
+
+    ``מספר הודעת תשלום קנס`` is a stable anchor for the problematic notice
+    variant; all other notices keep the legacy extraction behavior.
+    """
+    if _TYPE2_FINE_LABEL_RE.search(ocr_text or ""):
+        return _ANCHOR_BASED_TEMPLATE
+    return _LEGACY_TEMPLATE
+
+
 def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[str, Any]:
     """Extract plate/fine heuristics from OCR text blocks.
 
@@ -474,6 +487,8 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         }
 
     counts: Counter = Counter(cleaned)
+    template = _detect_fine_template(ocr_text)
+    logger.info("Fine OCR routing template_detected=%s", template)
 
     if debug:
         top_n = counts.most_common(10)
@@ -491,12 +506,16 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
 
     # --- Plate selection ---------------------------------------------------
     plate_candidates = [n for n in cleaned if len(n) in (7, 8)]
-    plate_profiles = {
-        n: _plate_candidate_profile(ocr_text, n) for n in set(plate_candidates)
-    }
+    plate_profiles = (
+        {n: _plate_candidate_profile(ocr_text, n) for n in set(plate_candidates)}
+        if template == _ANCHOR_BASED_TEMPLATE
+        else {}
+    )
 
-    def _plate_rank(n: str) -> Tuple[int, bool, int, bool, int]:
+    def _plate_rank(n: str) -> Tuple[int, ...]:
         base_score = _candidate_score(n, counts, "plate", ocr_text)
+        if template != _ANCHOR_BASED_TEMPLATE:
+            return base_score
         profile = plate_profiles.get(n, {})
         return (
             base_score[0],
@@ -509,15 +528,18 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     if debug:
         for n in sorted(set(plate_candidates), key=_plate_rank, reverse=True)[:8]:
             profile = plate_profiles.get(n, {})
-            logger.debug(
-                "  plate candidate=%s rank=%s occurrences=%s anchor_lines=%s narrative_lines=%s narrative_only=%s",
-                n,
-                _plate_rank(n),
-                profile.get("occurrences", 0),
-                profile.get("anchor_lines", 0),
-                profile.get("narrative_lines", 0),
-                profile.get("narrative_only", False),
-            )
+            if template == _ANCHOR_BASED_TEMPLATE:
+                logger.debug(
+                    "  plate candidate=%s rank=%s occurrences=%s anchor_lines=%s narrative_lines=%s narrative_only=%s",
+                    n,
+                    _plate_rank(n),
+                    profile.get("occurrences", 0),
+                    profile.get("anchor_lines", 0),
+                    profile.get("narrative_lines", 0),
+                    profile.get("narrative_only", False),
+                )
+            else:
+                logger.debug("  plate candidate=%s rank=%s", n, _plate_rank(n))
 
     best_plate_pre: str | None = (
         max(plate_candidates, key=_plate_rank)
@@ -530,7 +552,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     if best_plate_pre and plate_ctx == 0:
         if debug:
             profile = plate_profiles.get(best_plate_pre, {})
-            if profile.get("narrative_only"):
+            if template == _ANCHOR_BASED_TEMPLATE and profile.get("narrative_only"):
                 logger.debug(
                     "  plate %s rejected: narrative/body candidate without labeled anchor",
                     best_plate_pre,
@@ -546,8 +568,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     # Exclude best_plate (the accepted plate, after context check) to prevent
     # the same number occupying both slots.  If best_plate was rejected (None),
     # no number is excluded so all 7-10 digit candidates can compete.
-    is_type2_notice = bool(_TYPE2_FINE_LABEL_RE.search(ocr_text))
-    if is_type2_notice:
+    if template == _ANCHOR_BASED_TEMPLATE:
         fine_candidates = []
         for n in cleaned:
             if n == best_plate or len(n) not in (10, 11):
