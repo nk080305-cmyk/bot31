@@ -75,20 +75,28 @@ async def _ensure_fine_number(
     raw_confidence = field.get("confidence", 0.0)
     confidence = float(raw_confidence) if isinstance(raw_confidence, (float, int)) else 0.0
 
+    full_text = f"{ocr_text}\n{numeric_ocr_text}"
+    labeled_candidates = find_fine_number_candidates(full_text, labeled_only=True)
+    heuristic_value = pick_best_fine_number(labeled_candidates)
+    current_has_local_support = bool(current_value and current_value in labeled_candidates)
+
     # Only skip the focused extractor when the primary AI extraction is
-    # already highly confident (>= 0.75).  For moderate-confidence values the
-    # focused call may recover a better candidate (e.g. from numeric OCR).
-    if is_valid_fine_number(current_value) and confidence >= 0.75:
+    # already highly confident (>= 0.75) *and* the value is supported by a
+    # real fine-number label in OCR. This avoids preserving prompt-induced
+    # hallucinations for noisy municipal notices where only unrelated numbers
+    # are visible.
+    if is_valid_fine_number(current_value) and confidence >= 0.75 and current_has_local_support:
         field["value"] = current_value
         field["confidence"] = confidence
         return details
 
-    candidates = find_fine_number_candidates(f"{ocr_text}\n{numeric_ocr_text}")
-    heuristic_value = pick_best_fine_number(candidates)
-
     needs_focused = (
         not is_valid_fine_number(heuristic_value)
-        and (not is_valid_fine_number(current_value) or confidence < 0.75)
+        and (
+            not is_valid_fine_number(current_value)
+            or confidence < 0.75
+            or not current_has_local_support
+        )
     )
     if needs_focused:
         focused_result = await focused_extractor(ocr_text, numeric_ocr_text)
@@ -106,8 +114,8 @@ async def _ensure_fine_number(
         field["value"] = heuristic_value
         field["confidence"] = max(confidence, 0.55)
     else:
-        field["value"] = current_value or None
-        field["confidence"] = min(confidence, 0.4)
+        field["value"] = current_value if current_has_local_support else None
+        field["confidence"] = confidence if current_has_local_support else min(confidence, 0.4)
     return details
 
 

@@ -272,19 +272,40 @@ def test_extract_plate_and_fine_candidates_decision_notice_prefers_labeled_plate
     assert result["plate"] == "7654321"
 
 
-def test_extract_plate_and_fine_candidates_municipal_template_recovers_fine_number():
+def test_extract_plate_and_fine_candidates_real_municipal_preview_restores_local_fields():
     ocr_text = (
-        "הודעת תשלום קנס\n"
+        "wre\n"
+        "op ל\n"
+        "areas\n"
+        "wrt\n"
+        "הבר\n"
+        "ו\n"
+        "שר\n"
+        "ד\n"
+        "=n\n"
+        "ב\n"
         "19052 19\n"
-        "מספר רכב\n"
+        "וה\n"
+        "3/4/2023\n"
+        "אקום הטביוה: חול\n"
+        "חניוך בזק אטוק 3\n"
+        "מטפר רבב\n"
+        "6 רכב\n"
         "6486471\n"
+        "ig\n"
+        "a1 צבע\n"
+        "לבר\n"
         "יצרן רכב\n"
-        "גובה הקנס בט\"ח: 100\n"
-        "הערות הפקח\n"
+        "mia\n"
+        "גובה הקנם בט\"ח: 100\n"
         "עבירה - 133\n"
+        "הערות ההפקח\n"
     )
     result = extract_plate_and_fine_candidates(ocr_text, "1905219 6486471 100 133")
-    assert result["fine"] == "1905219"
+    assert result["plate"] == "6486471"
+    assert result["plate_ctx"] >= 4
+    assert result["amount"] == "100"
+    assert result["fine"] is None
 
 
 def test_detect_fine_template_noisy_municipal_anchors_stay_legacy():
@@ -482,3 +503,76 @@ def test_extract_plate_and_fine_candidates_returns_plate_ctx():
     assert "plate_ctx" in result, "plate_ctx must be returned for reconciliation"
     # Number on the same line as a plate keyword → context score should be > 0
     assert result["plate_ctx"] > 0
+
+
+def test_extract_plate_and_fine_candidates_real_decision_preview_keeps_anchor_locality():
+    ocr_text = (
+        "——— הודעה על החלטה להטיל קנס/תעבזרה - \"תעודת עובד הציבור\"\n"
+        "/\n"
+        "pap myn מספר הודעוו\n"
+        "gloat 1 סט del ye כ צ 39 -\"- 53 ab ge בוק\"\n"
+        "al gl ₪93 jlauil pd)\n"
+        "4\n"
+        "4 לוק הפרמ תעבורח מנהליז, oun 2004\n"
+        "30850005064\n"
+        "Alf\n"
+        "a\n"
+        "ye dane B59\n"
+        "אל |\n"
+        "104 - ay J>Y) ayg oil וש 6\n"
+        "ב\n"
+        "ותה עסו ריע גהעה.\n"
+        "co) אנטולי קוגיא בס\n"
+        "7345742623\n"
+        "waren\n"
+        "Xo\n"
+        "חונה דמובות , פלדי\n"
+        "0 TpHD 24 TT IR\n"
+        "2895338 (nw) ron wo|\n"
+        "Era\n"
+        "\"aoa\n"
+        "Aaleall [Sc rll 05911 5-09 mona. nx ב 3 תאורהעובדות המהוות\n"
+        "[נתאריך 16/00/2028\n"
+        "[אגטמע ש\n"
+        "16:53 nwa\n"
+        "Po\n"
+        "co)\n"
+        "aaa\n"
+        "בכביש 46 ק\"ט ב נוסזרח, צומת קטורה.\n"
+        "pia\n"
+        "ama\n"
+        "peers, ירצות\n"
+        "aaa Sm]\n"
+        "תרכ פרטי נוַעים.\n"
+        "TOY ATEN הכב A]\n"
+        "So טר ו\n"
+        "ב הובכ לב\n"
+        "ה\n"
+        "rer ות\n"
+        "למע\n"
+        "om\n"
+        "BD POT TAT AMD WPA, מ 0 0 0 הר\n"
+        "--\n"
+        "509 anne AT .\n"
+        "26\n"
+        "[aap\n"
+        "Team oP,\n"
+        "nod\n"
+        "eae aT\n"
+        "naga nee | ו\n"
+        "₪\n"
+        "‘aolpall ds הטלום הקופ ₪\n"
+        "ere oo\n"
+        "SOR AID\n"
+        "חן לשל בסנימי הדואר ובאינטרגט 49107 pond מקבלת הדוה\n"
+        "W250\n"
+        "15/05/2026\n"
+        "את הקנס | כפל הקנס ש\n"
+    )
+    result = extract_plate_and_fine_candidates(
+        ocr_text,
+        "30850005064 7345742623 2895338 05911509 49107 15052026 250",
+    )
+    assert result["fine"] is None
+    assert result["plate"] is None
+    assert result["amount"] == "250"

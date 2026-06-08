@@ -32,6 +32,16 @@ def test_find_fine_number_candidates_prefers_keyword_scope():
     assert "51903219" in candidates
 
 
+def test_find_fine_number_candidates_labeled_only_ignores_unlabeled_numbers():
+    text = (
+        "19052 19\n"
+        "מספר רכב 6486471\n"
+        "גובה הקנס 100\n"
+    )
+    candidates = find_fine_number_candidates(text, labeled_only=True)
+    assert candidates == []
+
+
 def test_find_fine_number_candidates_type2_avoids_tz():
     text = (
         "מספר הודעת תשלום קנס: 12345-67890\n"
@@ -204,6 +214,33 @@ def test_ensure_fine_number_skips_focused_for_high_confidence():
     assert updated["fine_number"]["value"] == "51903219"
 
 
+def test_ensure_fine_number_drops_unsupported_high_confidence_legacy_value():
+    """Unsupported municipal top-of-page numbers should not survive by confidence alone."""
+    called = []
+
+    async def fake_focused(_ocr, _num):
+        called.append(True)
+        return {"fine_number": None, "confidence": 0.0}
+
+    ocr_text = (
+        "19052 19\n"
+        "מטפר רבב\n"
+        "6 רכב\n"
+        "6486471\n"
+        "גובה הקנם בט\"ח: 100\n"
+    )
+    updated = asyncio.run(
+        _ensure_fine_number(
+            {"fine_number": {"value": "1905219", "confidence": 0.85}},
+            ocr_text,
+            "1905219 6486471 100",
+            focused_extractor=fake_focused,
+        )
+    )
+    assert called, "focused extractor should re-check unsupported municipal values"
+    assert updated["fine_number"]["value"] is None
+
+
 def test_reconcile_uses_plate_with_strong_anchor_ctx_even_if_not_confident():
     """Plate with strong anchor context is used even without plate_confident flag.
 
@@ -260,4 +297,3 @@ def test_reconcile_ignores_plate_with_no_anchor_ctx_and_not_confident():
     )
     # Without context or confidence, plate should not be applied
     assert "vehicle_plate" not in result or result.get("vehicle_plate", {}).get("value") is None
-

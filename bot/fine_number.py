@@ -19,6 +19,10 @@ _KEYWORD_RE = re.compile(
     % (_OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS),
     re.IGNORECASE,
 )
+_NOISY_NOTICE_LABEL_RE = re.compile(
+    r"מס(?:פר)?[^\n]{0,24}הודע",
+    re.IGNORECASE,
+)
 _TYPE2_FINE_LABEL_RE = re.compile(
     r"מספר%sהודעת%sתשלום%sקנס"
     % (_OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS, _OPTIONAL_SEPARATORS),
@@ -81,7 +85,11 @@ def is_valid_fine_number(
     return min_len <= len(normalized) <= max_len
 
 
-def find_fine_number_candidates(text: str) -> List[str]:
+def _line_has_fine_label(line: str) -> bool:
+    return bool(_KEYWORD_RE.search(line) or _NOISY_NOTICE_LABEL_RE.search(line))
+
+
+def find_fine_number_candidates(text: str, *, labeled_only: bool = False) -> List[str]:
     """Extract normalized fine-number candidates from OCR text.
 
     For type #2 Israeli fine notices (``מספר הודעת תשלום קנס``), candidates are
@@ -96,11 +104,12 @@ def find_fine_number_candidates(text: str) -> List[str]:
     raw_candidates: List[str] = []
     lines = text.splitlines()
     for idx, line in enumerate(lines):
-        if _KEYWORD_RE.search(line):
-            scope = "\n".join(lines[idx : idx + 2])
+        if _line_has_fine_label(line):
+            scope = "\n".join(lines[idx : idx + 6])
             raw_candidates.extend(_CANDIDATE_RE.findall(scope))
 
-    raw_candidates.extend(_CANDIDATE_RE.findall(text))
+    if not labeled_only:
+        raw_candidates.extend(_CANDIDATE_RE.findall(text))
 
     normalized: List[str] = []
     for candidate in raw_candidates:
