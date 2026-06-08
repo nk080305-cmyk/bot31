@@ -34,6 +34,17 @@ def test_extract_plate_and_fine_candidates_context_and_frequency():
     assert result["fine_confident"] is True
 
 
+def test_extract_plate_and_fine_candidates_legacy_template_keeps_8_digit_fine():
+    ocr_text = (
+        "מספר רכב: 2266111\n"
+        "מספר דוח: 51903219\n"
+        "תעודת זהות: 123456789\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "2266111 51903219 123456789")
+    assert result["plate"] == "2266111"
+    assert result["fine"] == "51903219"
+
+
 def test_extract_plate_and_fine_candidates_context_required_for_plate():
     """Plate candidate with no context proximity should be rejected (→ None)."""
     # The fine number appears near its keyword; the plate number appears
@@ -135,6 +146,16 @@ def test_extract_plate_and_fine_candidates_type2_merged_spaces_and_punctuation()
     assert result["fine"] != "234567890"
 
 
+def test_extract_plate_and_fine_candidates_anchor_template_uses_type2_fine_strategy():
+    ocr_text = (
+        "מספר הודעת תשלום קנס: 1234567890\n"
+        "מספר דוח: 51903219\n"
+        "מספר רכב: 2266111\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "1234567890 51903219 2266111")
+    assert result["fine"] == "1234567890"
+
+
 def test_extract_plate_and_fine_candidates_amount_prefers_plausible_value_over_date():
     ocr_text = (
         "מספר רכב: 2266111\n"
@@ -175,10 +196,21 @@ def test_extract_plate_and_fine_candidates_debug_logging(monkeypatch, caplog):
 def test_extract_plate_and_fine_candidates_logs_narrative_rejection(monkeypatch, caplog):
     monkeypatch.setenv("OCR_DEBUG", "1")
     import logging
-    ocr_text = "אני החתום מטה רכב 5892531"
+    ocr_text = "מספר הודעת תשלום קנס: 1234567890\nאני החתום מטה רכב 5892531"
     with caplog.at_level(logging.DEBUG, logger="bot.ocr"):
-        extract_plate_and_fine_candidates(ocr_text, "5892531")
+        extract_plate_and_fine_candidates(ocr_text, "5892531 1234567890")
     assert any("narrative/body" in r.message for r in caplog.records)
+
+
+def test_extract_plate_and_fine_candidates_logs_template_detection(caplog):
+    import logging
+    legacy_text = "מספר רכב: 2266111\nמספר דוח: 51903219\n"
+    anchor_text = "מספר הודעת תשלום קנס: 1234567890\nמספר רכב: 2266111\n"
+    with caplog.at_level(logging.INFO, logger="bot.ocr"):
+        extract_plate_and_fine_candidates(legacy_text, "2266111 51903219")
+        extract_plate_and_fine_candidates(anchor_text, "1234567890 2266111")
+    assert any("template_detected=legacy" in r.message for r in caplog.records)
+    assert any("template_detected=anchor_based" in r.message for r in caplog.records)
 
 
 def test_multi_preprocess_flag_defaults_to_off(monkeypatch):
