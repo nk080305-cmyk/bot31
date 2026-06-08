@@ -33,7 +33,7 @@ TESSERACT_NUMERIC_PSM_MODES = [7, 6, 11]
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
 
 PLATE_KEYWORDS = ["מספר רכב", "מס רכב", "מס' רכב", "לוחית רישוי", "לוחית"]
-FINE_KEYWORDS = ["דוח", "מספר דוח", "קנס", "מספר הודעת תשלום קנס", "הודעת תשלום קנס"]
+FINE_KEYWORDS = ["דוח", "מספר דוח", "מספר הודעה", "קנס", "מספר הודעת תשלום קנס", "הודעת תשלום קנס"]
 AMOUNT_KEYWORDS = ["סכום", "סכום הקנס", "סך", "קנס", "כפל הקנס", "לתשלום"]
 NARRATIVE_MARKERS = [
     "אני החתום מטה",
@@ -49,10 +49,26 @@ _TYPE2_FINE_LABEL_RE = re.compile(
     % (_FLEX_SEPARATORS, _FLEX_SEPARATORS, _FLEX_SEPARATORS),
     re.IGNORECASE,
 )
+_TYPE2_NOTICE_LABEL_RE = re.compile(
+    r"הודעת%sתשלום%sקנס"
+    % (_FLEX_SEPARATORS, _FLEX_SEPARATORS),
+    re.IGNORECASE,
+)
+_LEGACY_NOTICE_LABEL_RE = re.compile(
+    r"(מספר%sדוח|דוח%sמספר|מספר%sהודעה)"
+    % (_FLEX_SEPARATORS, _FLEX_SEPARATORS, _FLEX_SEPARATORS),
+    re.IGNORECASE,
+)
 _TZ_LABEL_RE = re.compile(r"תעודת%sזהות" % _FLEX_SEPARATORS, re.IGNORECASE)
 _DATE_TOKEN_RE = re.compile(r"(?<!\d)\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?!\d)")
 _LEGACY_TEMPLATE = "legacy"
 _ANCHOR_BASED_TEMPLATE = "anchor_based"
+_LEGACY_FINE_LABEL_KEYWORDS = [
+    "מספר הודעת תשלום קנס",
+    "הודעת תשלום קנס",
+    "מספר הודעה",
+    "מספר דוח",
+]
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -426,15 +442,22 @@ def _amount_candidate_score(
     )
 
 
+def _detect_fine_template_with_reason(ocr_text: str) -> Tuple[str, str]:
+    text = ocr_text or ""
+    if _TYPE2_FINE_LABEL_RE.search(text):
+        return _ANCHOR_BASED_TEMPLATE, "explicit_type2_label"
+    if _TYPE2_NOTICE_LABEL_RE.search(text) and not _LEGACY_NOTICE_LABEL_RE.search(text):
+        return _ANCHOR_BASED_TEMPLATE, "type2_notice_without_legacy_notice_label"
+    return _LEGACY_TEMPLATE, "fallback_legacy_notice"
+
+
 def _detect_fine_template(ocr_text: str) -> str:
     """Choose extraction template from stable OCR notice labels.
 
     ``מספר הודעת תשלום קנס`` is a stable anchor for the problematic notice
     variant; all other notices keep the legacy extraction behavior.
     """
-    if _TYPE2_FINE_LABEL_RE.search(ocr_text or ""):
-        return _ANCHOR_BASED_TEMPLATE
-    return _LEGACY_TEMPLATE
+    return _detect_fine_template_with_reason(ocr_text)[0]
 
 
 def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[str, Any]:
@@ -487,8 +510,8 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         }
 
     counts: Counter = Counter(cleaned)
-    template = _detect_fine_template(ocr_text)
-    logger.info("Fine OCR routing template_detected=%s", template)
+    template, template_reason = _detect_fine_template_with_reason(ocr_text)
+    logger.info("Fine OCR routing template_detected=%s reason=%s", template, template_reason)
 
     if debug:
         top_n = counts.most_common(10)
@@ -564,6 +587,11 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     else:
         best_plate = best_plate_pre
 
+    date_like_values = {
+        "".join(ch for ch in m.group() if ch.isdigit())
+        for m in _DATE_TOKEN_RE.finditer(full_text)
+    }
+
     # --- Fine selection ----------------------------------------------------
     # Exclude best_plate (the accepted plate, after context check) to prevent
     # the same number occupying both slots.  If best_plate was rejected (None),
@@ -584,6 +612,27 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
                 fine_candidates.append(n)
     else:
         fine_candidates = [n for n in cleaned if 7 <= len(n) <= 10 and n != best_plate]
+        labeled_notice_candidates: list[str] = []
+        for idx, line in enumerate(ocr_text.splitlines()):
+            if not any(_line_has_keyword(line, kw) for kw in _LEGACY_FINE_LABEL_KEYWORDS):
+                continue
+            scope_start = max(0, idx - 1)
+            scope_end = min(len(ocr_text.splitlines()), idx + 2)
+            scope = "\n".join(ocr_text.splitlines()[scope_start:scope_end])
+            for token in re.findall(r"\d[\d \t\-./,:]{4,16}\d", scope):
+                candidate = "".join(ch for ch in token if ch.isdigit())
+                if len(candidate) not in (7, 8, 9, 10) or candidate == best_plate:
+                    continue
+                number_re = _digits_pattern(candidate)
+                near_tz = any(
+                    _TZ_LABEL_RE.search(scope_line) and number_re.search(scope_line)
+                    for scope_line in scope.splitlines()
+                )
+                if near_tz or candidate in date_like_values:
+                    continue
+                labeled_notice_candidates.append(candidate)
+        if labeled_notice_candidates:
+            fine_candidates = labeled_notice_candidates + fine_candidates
 
     if debug:
         for n in sorted(set(fine_candidates), key=lambda x: _candidate_score(x, counts, "fine", ocr_text), reverse=True)[:5]:
@@ -591,7 +640,13 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
             logger.debug("  fine candidate %s score=%s", n, sc)
 
     best_fine_pre: str | None = (
-        max(fine_candidates, key=lambda n: _candidate_score(n, counts, "fine", ocr_text))
+        max(
+            fine_candidates,
+            key=lambda n: (
+                n not in date_like_values,
+                _candidate_score(n, counts, "fine", ocr_text),
+            ),
+        )
         if fine_candidates
         else None
     )
@@ -607,10 +662,6 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         best_fine = best_fine_pre
 
     # --- Fine amount selection ----------------------------------------------
-    date_like_values = {
-        "".join(ch for ch in m.group() if ch.isdigit())
-        for m in _DATE_TOKEN_RE.finditer(full_text)
-    }
     amount_raw = re.findall(r"(?<!\d)(?:\d[ \t\-./,:]?){0,5}\d(?!\d)", full_text)
     amount_cleaned = ["".join(ch for ch in token if ch.isdigit()) for token in amount_raw]
     amount_cleaned = [n for n in amount_cleaned if 1 <= len(n) <= 6]

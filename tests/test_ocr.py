@@ -213,6 +213,35 @@ def test_extract_plate_and_fine_candidates_logs_template_detection(caplog):
     assert any("template_detected=anchor_based" in r.message for r in caplog.records)
 
 
+def test_extract_plate_and_fine_candidates_legacy_notice_anchor_extracts_fine_number(caplog):
+    import logging
+    ocr_text = (
+        "הודעת תשלום קנס\n"
+        "מספר הודעה: 51903219\n"
+        "מספר רכב: 1234567\n"
+        "תאריך צילום: 15/05/2076\n"
+    )
+    with caplog.at_level(logging.INFO, logger="bot.ocr"):
+        result = extract_plate_and_fine_candidates(ocr_text, "51903219 1234567 15052076 2076")
+    assert any("template_detected=legacy" in r.message for r in caplog.records)
+    assert result["fine"] == "51903219"
+
+
+def test_extract_plate_and_fine_candidates_type2_notice_routes_anchor_and_keeps_labeled_plate(caplog):
+    import logging
+    ocr_text = (
+        "הודעת תשלום קנס\n"
+        "אני החתום מטה בתאריך 15/05/2076 מציין את פרטי המקרה\n"
+        "מספר רכב: 2266111\n"
+        "תעודת זהות: 123456789\n"
+    )
+    with caplog.at_level(logging.INFO, logger="bot.ocr"):
+        result = extract_plate_and_fine_candidates(ocr_text, "15052076 2076 2266111 123456789")
+    assert any("template_detected=anchor_based" in r.message for r in caplog.records)
+    assert result["plate"] == "2266111"
+    assert result["fine"] is None
+
+
 def test_multi_preprocess_flag_defaults_to_off(monkeypatch):
     monkeypatch.delenv("OCR_MULTI_VARIANTS", raising=False)
     monkeypatch.delenv("OCR_MULTI_PREPROCESS", raising=False)
