@@ -49,6 +49,16 @@ def test_extract_plate_and_fine_candidates_context_required_for_plate():
     assert result["fine"] == "51903219"
 
 
+def test_extract_plate_and_fine_candidates_prefers_plate_anchor_over_narrative_number():
+    ocr_text = (
+        "מס רכב: 2266111\n"
+        "אני החתום מטה מציין: רכב 5892531 לא עצר בקו עצירה\n"
+        "מספר דוח: 51903219\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "2266111 5892531 51903219")
+    assert result["plate"] == "2266111"
+
+
 def test_extract_plate_and_fine_candidates_context_required_for_fine():
     """Fine candidate with no context proximity should be rejected (→ None)."""
     ocr_text = (
@@ -125,6 +135,18 @@ def test_extract_plate_and_fine_candidates_type2_merged_spaces_and_punctuation()
     assert result["fine"] != "234567890"
 
 
+def test_extract_plate_and_fine_candidates_amount_prefers_plausible_value_over_date():
+    ocr_text = (
+        "מספר רכב: 2266111\n"
+        "מספר דוח: 51903219\n"
+        "סכום הקנס: 250 ₪\n"
+        "יש לשלם עד 15/05/2026\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "15052026 250")
+    assert result["amount"] == "250"
+    assert result["fine"] == "51903219"
+
+
 def test_extract_plate_and_fine_candidates_plate_anchor_with_abbrev_and_separators():
     ocr_text = (
         "מס' רכב: 12-345-678\n"
@@ -148,6 +170,15 @@ def test_extract_plate_and_fine_candidates_debug_logging(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG, logger="bot.ocr"):
         extract_plate_and_fine_candidates(ocr_text, "12345678 51903219")
     assert any("candidate" in r.message.lower() or "winner" in r.message.lower() for r in caplog.records)
+
+
+def test_extract_plate_and_fine_candidates_logs_narrative_rejection(monkeypatch, caplog):
+    monkeypatch.setenv("OCR_DEBUG", "1")
+    import logging
+    ocr_text = "אני החתום מטה רכב 5892531"
+    with caplog.at_level(logging.DEBUG, logger="bot.ocr"):
+        extract_plate_and_fine_candidates(ocr_text, "5892531")
+    assert any("narrative/body" in r.message for r in caplog.records)
 
 
 def test_multi_preprocess_flag_defaults_to_off(monkeypatch):

@@ -32,8 +32,17 @@ TESSERACT_PSM_MODES = [6, 4, 11]
 TESSERACT_NUMERIC_PSM_MODES = [7, 6, 11]
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
 
-PLATE_KEYWORDS = ["רכב", "מספר רכב"]
+PLATE_KEYWORDS = ["מספר רכב", "מס רכב", "מס' רכב", "לוחית רישוי", "לוחית"]
 FINE_KEYWORDS = ["דוח", "מספר דוח", "קנס", "מספר הודעת תשלום קנס", "הודעת תשלום קנס"]
+AMOUNT_KEYWORDS = ["סכום", "סכום הקנס", "סך", "קנס", "כפל הקנס", "לתשלום"]
+NARRATIVE_MARKERS = [
+    "אני החתום מטה",
+    "סיבות",
+    "הצהרת עורך ההודעה",
+    "הנהג",
+    "נוסעים",
+    "הגש",
+]
 _FLEX_SEPARATORS = r"[ \t\-./,:_]*"
 _TYPE2_FINE_LABEL_RE = re.compile(
     r"מספר%sהודעת%sתשלום%sקנס"
@@ -41,6 +50,7 @@ _TYPE2_FINE_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _TZ_LABEL_RE = re.compile(r"תעודת%sזהות" % _FLEX_SEPARATORS, re.IGNORECASE)
+_DATE_TOKEN_RE = re.compile(r"(?<!\d)\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?!\d)")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -372,15 +382,60 @@ def _candidate_score(
     )
 
 
+def _digits_pattern(number: str) -> re.Pattern[str]:
+    return re.compile(r"(?<!\d)%s(?!\d)" % _FLEX_SEPARATORS.join(re.escape(ch) for ch in number))
+
+
+def _line_has_keyword(line: str, keyword: str) -> bool:
+    kw_re = re.compile(
+        _FLEX_SEPARATORS.join(re.escape(part) for part in keyword.split()),
+        re.IGNORECASE,
+    )
+    return bool(kw_re.search(line))
+
+
+def _plate_candidate_profile(text: str, candidate: str) -> Dict[str, int | bool]:
+    number_re = _digits_pattern(candidate)
+    lines = [line for line in text.splitlines() if number_re.search(line)]
+    anchor_lines = sum(1 for line in lines if any(_line_has_keyword(line, kw) for kw in PLATE_KEYWORDS))
+    narrative_lines = sum(
+        1 for line in lines if any(marker in line for marker in NARRATIVE_MARKERS)
+    )
+    return {
+        "occurrences": len(lines),
+        "anchor_lines": anchor_lines,
+        "narrative_lines": narrative_lines,
+        "narrative_only": bool(lines and anchor_lines == 0 and narrative_lines > 0),
+    }
+
+
+def _amount_candidate_score(
+    candidate: str, counts: Counter, ocr_text: str, date_like_values: set[str]
+) -> Tuple[bool, int, bool, int, int]:
+    value = int(candidate)
+    amount_ctx = _context_score(ocr_text, candidate, AMOUNT_KEYWORDS, window=120)
+    plausible = 20 <= value <= 20000
+    return (
+        candidate not in date_like_values,
+        amount_ctx,
+        plausible,
+        counts[candidate],
+        -abs(len(candidate) - 3),
+    )
+
+
 def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[str, Any]:
     """Extract plate/fine heuristics from OCR text blocks.
 
     Selection rules
     ---------------
-    * Plate candidates must be exactly 7 or 8 digits.
+    * Plate candidates must be exactly 7 or 8 digits and are prioritized when
+      they appear near explicit vehicle-number anchors (for example ``מס רכב``).
     * Fine candidates are normally 7–10 digits. For type #2 notices where the
       label ``מספר הודעת תשלום קנס`` is present, fine candidates are restricted
       to 10–11 digits and numbers close to ``תעודת זהות`` are ignored.
+    * Amount candidates are short numeric values near amount anchors (for
+      example ``סכום`` / ``סך`` / ``קנס``); date-shaped values are rejected.
     * **Context is required**: a candidate is only accepted when it appears
       within ±150 characters of at least one keyword from the relevant set
       (``PLATE_KEYWORDS`` / ``FINE_KEYWORDS``).  If no candidate satisfies
@@ -400,7 +455,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     you need to reference.
     """
     full_text = f"{ocr_text}\n{numeric_text}"
-    raw = re.findall(r"\d[\d\s\-./,:]{4,16}\d", full_text)
+    raw = re.findall(r"\d[\d \t\-./,:]{4,16}\d", full_text)
     cleaned = ["".join(ch for ch in token if ch.isdigit()) for token in raw]
     cleaned = [n for n in cleaned if 6 <= len(n) <= 12 and len(set(n)) > 2]
 
@@ -412,8 +467,10 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         return {
             "plate": None,
             "fine": None,
+            "amount": None,
             "plate_confident": False,
             "fine_confident": False,
+            "amount_confident": False,
         }
 
     counts: Counter = Counter(cleaned)
@@ -421,17 +478,49 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     if debug:
         top_n = counts.most_common(10)
         logger.debug("OCR heuristic candidates (top %d): %s", len(top_n), top_n)
+        plate_anchor_hits: list[tuple[str, str]] = []
+        for line in ocr_text.splitlines():
+            for kw in PLATE_KEYWORDS:
+                if _line_has_keyword(line, kw):
+                    plate_anchor_hits.append((kw, line.strip()[:120]))
+                    break
+        if plate_anchor_hits:
+            logger.debug("  plate anchor hits: %s", plate_anchor_hits[:8])
+        else:
+            logger.debug("  plate anchor hits: none")
 
     # --- Plate selection ---------------------------------------------------
     plate_candidates = [n for n in cleaned if len(n) in (7, 8)]
+    plate_profiles = {
+        n: _plate_candidate_profile(ocr_text, n) for n in set(plate_candidates)
+    }
+
+    def _plate_rank(n: str) -> Tuple[int, bool, int, bool, int]:
+        base_score = _candidate_score(n, counts, "plate", ocr_text)
+        profile = plate_profiles.get(n, {})
+        return (
+            base_score[0],
+            not bool(profile.get("narrative_only", False)),
+            base_score[1],
+            base_score[2],
+            base_score[3],
+        )
 
     if debug:
-        for n in sorted(set(plate_candidates), key=lambda x: _candidate_score(x, counts, "plate", ocr_text), reverse=True)[:5]:
-            sc = _candidate_score(n, counts, "plate", ocr_text)
-            logger.debug("  plate candidate %s score=%s", n, sc)
+        for n in sorted(set(plate_candidates), key=_plate_rank, reverse=True)[:8]:
+            profile = plate_profiles.get(n, {})
+            logger.debug(
+                "  plate candidate=%s rank=%s occurrences=%s anchor_lines=%s narrative_lines=%s narrative_only=%s",
+                n,
+                _plate_rank(n),
+                profile.get("occurrences", 0),
+                profile.get("anchor_lines", 0),
+                profile.get("narrative_lines", 0),
+                profile.get("narrative_only", False),
+            )
 
     best_plate_pre: str | None = (
-        max(plate_candidates, key=lambda n: _candidate_score(n, counts, "plate", ocr_text))
+        max(plate_candidates, key=_plate_rank)
         if plate_candidates
         else None
     )
@@ -440,7 +529,14 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     plate_ctx = _context_score(ocr_text, best_plate_pre or "", PLATE_KEYWORDS) if best_plate_pre else 0
     if best_plate_pre and plate_ctx == 0:
         if debug:
-            logger.debug("  plate %s rejected: no context proximity", best_plate_pre)
+            profile = plate_profiles.get(best_plate_pre, {})
+            if profile.get("narrative_only"):
+                logger.debug(
+                    "  plate %s rejected: narrative/body candidate without labeled anchor",
+                    best_plate_pre,
+                )
+            else:
+                logger.debug("  plate %s rejected: no context proximity", best_plate_pre)
         best_plate: str | None = None
         plate_ctx = 0
     else:
@@ -489,6 +585,52 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     else:
         best_fine = best_fine_pre
 
+    # --- Fine amount selection ----------------------------------------------
+    date_like_values = {
+        "".join(ch for ch in m.group() if ch.isdigit())
+        for m in _DATE_TOKEN_RE.finditer(full_text)
+    }
+    amount_raw = re.findall(r"(?<!\d)(?:\d[ \t\-./,:]?){0,5}\d(?!\d)", full_text)
+    amount_cleaned = ["".join(ch for ch in token if ch.isdigit()) for token in amount_raw]
+    amount_cleaned = [n for n in amount_cleaned if 1 <= len(n) <= 6]
+    amount_counts: Counter = Counter(amount_cleaned)
+    amount_candidates = [n for n in amount_cleaned if n != best_plate and n != best_fine]
+    amount_candidates = [n for n in amount_candidates if int(n) > 0]
+
+    if debug:
+        for n in sorted(
+            set(amount_candidates),
+            key=lambda x: _amount_candidate_score(x, amount_counts, ocr_text, date_like_values),
+            reverse=True,
+        )[:8]:
+            logger.debug(
+                "  amount candidate=%s rank=%s rejected_date=%s",
+                n,
+                _amount_candidate_score(n, amount_counts, ocr_text, date_like_values),
+                n in date_like_values,
+            )
+
+    best_amount_pre: str | None = (
+        max(
+            amount_candidates,
+            key=lambda n: _amount_candidate_score(n, amount_counts, ocr_text, date_like_values),
+        )
+        if amount_candidates
+        else None
+    )
+    amount_ctx = _context_score(ocr_text, best_amount_pre or "", AMOUNT_KEYWORDS, window=120) if best_amount_pre else 0
+    if best_amount_pre and best_amount_pre in date_like_values:
+        if debug:
+            logger.debug("  amount %s rejected: date-like token", best_amount_pre)
+        best_amount = None
+        amount_ctx = 0
+    elif best_amount_pre and amount_ctx == 0:
+        if debug:
+            logger.debug("  amount %s selected with weak anchor proximity", best_amount_pre)
+        best_amount = best_amount_pre
+    else:
+        best_amount = best_amount_pre
+
     # --- Tie-break if plate == fine ----------------------------------------
     if best_plate and best_fine and best_plate == best_fine:
         if debug:
@@ -512,24 +654,30 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
 
     plate_confident = bool(best_plate and counts[best_plate] >= 2 and plate_ctx >= 2)
     fine_confident = bool(best_fine and counts[best_fine] >= 2 and fine_ctx >= 2)
+    amount_confident = bool(best_amount and (amount_ctx >= 2 or 20 <= int(best_amount) <= 20000))
 
     if debug:
         logger.debug(
             "OCR heuristic winners: plate=%s (ctx=%d, confident=%s),"
-            " fine=%s (ctx=%d, confident=%s)",
+            " fine=%s (ctx=%d, confident=%s), amount=%s (ctx=%d, confident=%s)",
             best_plate,
             plate_ctx,
             plate_confident,
             best_fine,
             fine_ctx,
             fine_confident,
+            best_amount,
+            amount_ctx,
+            amount_confident,
         )
 
     return {
         "plate": best_plate,
         "fine": best_fine,
+        "amount": best_amount,
         "plate_confident": plate_confident,
         "fine_confident": fine_confident,
+        "amount_confident": amount_confident,
     }
 
 
