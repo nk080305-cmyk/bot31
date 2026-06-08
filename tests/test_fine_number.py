@@ -8,6 +8,7 @@ from bot.fine_number import (
 )
 from bot.handlers.upload import _apply_heuristic_candidates
 from bot.handlers.upload import _apply_vision_candidates
+from bot.handlers.upload import _choose_final_plate_candidate
 from bot.handlers.upload import _ensure_fine_number
 
 
@@ -116,3 +117,31 @@ def test_apply_vision_candidates_overrides_only_valid_vision_fields():
     assert updated["vehicle_plate"]["value"] == "12345678"
     assert updated["vehicle_plate"]["confidence"] == 0.98
     assert updated["fine_number"]["value"] == "51903219"
+
+
+def test_choose_final_plate_candidate_prefers_ocr_8_over_vision_7():
+    selected, source, reason = _choose_final_plate_candidate("1234567", "12345678")
+    assert selected == "12345678"
+    assert source == "ocr"
+    assert reason == "ocr_format_preferred"
+
+
+def test_choose_final_plate_candidate_prefers_vision_8_over_ocr_7():
+    selected, source, reason = _choose_final_plate_candidate("12345678", "1234567")
+    assert selected == "12345678"
+    assert source == "vision"
+    assert reason == "vision_format_preferred"
+
+
+def test_choose_final_plate_candidate_same_class_keeps_deterministic_vision_preference():
+    selected, source, reason = _choose_final_plate_candidate("11112222", "33334444")
+    assert selected == "11112222"
+    assert source == "vision"
+    assert reason == "same_class_prefer_vision"
+
+
+def test_choose_final_plate_candidate_picks_valid_over_invalid():
+    selected, source, reason = _choose_final_plate_candidate("12345", "1234567")
+    assert selected == "1234567"
+    assert source == "ocr"
+    assert reason == "ocr_format_preferred"

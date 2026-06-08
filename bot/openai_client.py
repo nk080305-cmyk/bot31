@@ -316,7 +316,10 @@ async def extract_vision_fields(image_path: str, ocr_text: str = "") -> Dict[str
             temperature=0.0,
             max_output_tokens=200,
         )
-        result = json.loads(_extract_response_text(response))
+        raw_result = _extract_response_text(response)
+        logger.info("Vision extraction raw result: %s", raw_result)
+        result = json.loads(raw_result)
+        logger.info("Vision extraction structured result: %s", result)
     except json.JSONDecodeError:
         logger.warning("Vision extraction returned invalid JSON")
         return {}

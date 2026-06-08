@@ -14,7 +14,7 @@ import logging
 import os
 import tempfile
 import uuid
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Tuple
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -158,6 +158,93 @@ def _apply_vision_candidates(details: Dict[str, Any], vision_fields: Dict[str, s
     return details
 
 
+def _plate_preference_rank(plate: str) -> int:
+    """Rank plate candidates by Israeli-like plate format preference."""
+    if len(plate) == 8:
+        return 3
+    if len(plate) == 7:
+        return 2
+    if plate:
+        return 1
+    return 0
+
+
+def _choose_final_plate_candidate(
+    vision_plate: str | None, ocr_plate: str | None
+) -> Tuple[str | None, str, str]:
+    """Pick final plate from Vision/OCR candidates with deterministic tie-break."""
+    if vision_plate and not ocr_plate:
+        return vision_plate, "vision", "only_vision_candidate"
+    if ocr_plate and not vision_plate:
+        return ocr_plate, "ocr", "only_ocr_candidate"
+    if not vision_plate and not ocr_plate:
+        return None, "none", "no_candidates"
+
+    assert vision_plate is not None and ocr_plate is not None
+    vision_rank = _plate_preference_rank(vision_plate)
+    ocr_rank = _plate_preference_rank(ocr_plate)
+    if vision_rank > ocr_rank:
+        return vision_plate, "vision", "vision_format_preferred"
+    if ocr_rank > vision_rank:
+        return ocr_plate, "ocr", "ocr_format_preferred"
+
+    # Deterministic router-level tie-break: keep Vision when same class.
+    return vision_plate, "vision", "same_class_prefer_vision"
+
+
+def _reconcile_vehicle_plate(
+    details: Dict[str, Any],
+    heuristic_candidates: Dict[str, Any],
+    vision_fields: Dict[str, str],
+    *,
+    user_id: int,
+    case_id: str,
+) -> Dict[str, Any]:
+    """Centralized final vehicle plate selection in router flow."""
+    if not isinstance(details, dict):
+        details = {}
+    if not isinstance(heuristic_candidates, dict):
+        heuristic_candidates = {}
+    if not isinstance(vision_fields, dict):
+        vision_fields = {}
+
+    vision_plate = "".join(ch for ch in str(vision_fields.get("license_plate") or "") if ch.isdigit())
+    ocr_plate = ""
+    if heuristic_candidates.get("plate_confident"):
+        ocr_plate = "".join(ch for ch in str(heuristic_candidates.get("plate") or "") if ch.isdigit())
+
+    selected_plate, selected_source, decision_reason = _choose_final_plate_candidate(
+        vision_plate or None,
+        ocr_plate or None,
+    )
+    logger.info(
+        "Plate decision user_id=%s case_id=%s vision=%s ocr=%s selected=%s source=%s reason=%s",
+        user_id,
+        case_id,
+        vision_plate or None,
+        ocr_plate or None,
+        selected_plate,
+        selected_source,
+        decision_reason,
+    )
+    if not selected_plate:
+        return details
+
+    plate_field = details.get("vehicle_plate")
+    if not isinstance(plate_field, dict):
+        plate_field = {}
+        details["vehicle_plate"] = plate_field
+    current_conf = plate_field.get("confidence", 0.0)
+    current_conf = float(current_conf) if isinstance(current_conf, (float, int)) else 0.0
+    if selected_source == "vision":
+        plate_field["value"] = selected_plate
+        plate_field["confidence"] = max(current_conf, 0.98)
+    else:
+        plate_field["value"] = selected_plate
+        plate_field["confidence"] = max(current_conf, 0.65)
+    return details
+
+
 # ---------------------------------------------------------------------------
 # Core processing function
 # ---------------------------------------------------------------------------
@@ -211,9 +298,21 @@ async def _process_file(
         await message.answer(t("ocr_done", lang))
 
         heuristic_candidates = extract_plate_and_fine_candidates(ocr_text, numeric_ocr_text)
+        logger.info(
+            "OCR heuristic candidates user_id=%s case_id=%s data=%s",
+            message.from_user.id,
+            case_id,
+            heuristic_candidates,
+        )
         vision_fields: Dict[str, str] = {}
         if VISION_EXTRACT and ext in {".jpg", ".jpeg", ".png"}:
             vision_fields = await ai_extract_vision_fields(tmp_path, ocr_text)
+            logger.info(
+                "Vision extraction user_id=%s case_id=%s result=%s",
+                message.from_user.id,
+                case_id,
+                vision_fields,
+            )
 
         # --- OpenAI extraction ---
         try:
@@ -244,6 +343,13 @@ async def _process_file(
                 logger.error("Extraction failed for user_id=%s: %s", message.from_user.id, exc)
                 await message.answer(t("extraction_failed", lang))
                 return
+        details = _reconcile_vehicle_plate(
+            details,
+            heuristic_candidates,
+            vision_fields,
+            user_id=message.from_user.id,
+            case_id=case_id,
+        )
 
         await message.answer(t("extraction_done", lang))
 
