@@ -133,6 +133,18 @@ def _apply_heuristic_candidates(details: Dict[str, Any], candidates: Dict[str, A
         if candidates.get("fine_confident") and (not is_valid_fine_number(fine_value) or fine_conf < 0.7):
             fine_field["value"] = candidates["fine"]
             fine_field["confidence"] = max(fine_conf, 0.7)
+
+    if candidates.get("amount"):
+        amount_field = details.get("fine_amount")
+        if not isinstance(amount_field, dict):
+            amount_field = {}
+            details["fine_amount"] = amount_field
+        amount_value = str(amount_field.get("value") or "").strip()
+        amount_conf = amount_field.get("confidence", 0.0)
+        amount_conf = float(amount_conf) if isinstance(amount_conf, (float, int)) else 0.0
+        if candidates.get("amount_confident") and (not amount_value or amount_conf < 0.65):
+            amount_field["value"] = candidates["amount"]
+            amount_field["confidence"] = max(amount_conf, 0.65)
     return details
 
 

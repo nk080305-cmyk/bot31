@@ -94,16 +94,20 @@ def test_apply_heuristic_candidates_sets_weak_fields():
     details = {
         "vehicle_plate": {"value": "", "confidence": 0.2},
         "fine_number": {"value": "", "confidence": 0.2},
+        "fine_amount": {"value": "", "confidence": 0.2},
     }
     candidates = {
         "plate": "12345678",
         "fine": "51903219",
+        "amount": "250",
         "plate_confident": True,
         "fine_confident": True,
+        "amount_confident": True,
     }
     updated = _apply_heuristic_candidates(details, candidates)
     assert updated["vehicle_plate"]["value"] == "12345678"
     assert updated["fine_number"]["value"] == "51903219"
+    assert updated["fine_amount"]["value"] == "250"
 
 
 def test_apply_vision_candidates_overrides_only_valid_vision_fields():
