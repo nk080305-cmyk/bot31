@@ -1,6 +1,7 @@
 """Smoke tests and unit tests for bot.openai_client helpers."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from bot.openai_client import (
     # существующие импорты из main (оставь все которые были)
     _best_fine_candidate,
+    _best_plate_candidate,
     _context_digits_near_keywords,
     _digits_only,
     extract_fine_details,
@@ -170,7 +172,7 @@ def test_best_fine_candidate_empty_input():
     assert _best_fine_candidate("") is None
 
 
-<def test_extract_vision_fields_normalizes_type2_notice_and_plate(monkeypatch, tmp_path):
+def test_extract_vision_fields_normalizes_type2_notice_and_plate(monkeypatch, tmp_path):
     image_path = tmp_path / "notice.jpg"
     image_path.write_bytes(b"fake-jpeg")
     calls = []
