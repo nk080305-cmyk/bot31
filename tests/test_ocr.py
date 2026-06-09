@@ -272,7 +272,7 @@ def test_extract_plate_and_fine_candidates_decision_notice_prefers_labeled_plate
     assert result["plate"] == "7654321"
 
 
-def test_extract_plate_and_fine_candidates_real_municipal_preview_restores_local_fields():
+def test_extract_plate_and_fine_candidates_real_municipal_preview_selects_known_fine_number():
     ocr_text = (
         "wre\n"
         "op ל\n"
@@ -297,15 +297,24 @@ def test_extract_plate_and_fine_candidates_real_municipal_preview_restores_local
         "לבר\n"
         "יצרן רכב\n"
         "mia\n"
+        "עבירה\n"
+        "- 133\n"
+        "וומנת/הטחדת רכבך\n"
+        "בחקום wean בתאלום\n"
+        ",113723 להודאוה\n"
         "גובה הקנם בט\"ח: 100\n"
-        "עבירה - 133\n"
         "הערות ההפקח\n"
+        "חיום: 2/7/2023\n"
     )
-    result = extract_plate_and_fine_candidates(ocr_text, "1905219 6486471 100 133")
+    result = extract_plate_and_fine_candidates(
+        ocr_text,
+        "09224227 1905219 6486471 113723 100 133",
+    )
     assert result["plate"] == "6486471"
     assert result["plate_ctx"] >= 4
     assert result["amount"] == "100"
-    assert result["fine"] is None
+    assert result["fine"] == "09224227"
+    assert result["fine"] != "1905219"
 
 
 def test_detect_fine_template_noisy_municipal_anchors_stay_legacy():
@@ -505,7 +514,7 @@ def test_extract_plate_and_fine_candidates_returns_plate_ctx():
     assert result["plate_ctx"] > 0
 
 
-def test_extract_plate_and_fine_candidates_real_decision_preview_keeps_anchor_locality():
+def test_extract_plate_and_fine_candidates_real_decision_preview_separates_plate_from_ids():
     ocr_text = (
         "——— הודעה על החלטה להטיל קנס/תעבזרה - \"תעודת עובד הציבור\"\n"
         "/\n"
@@ -571,8 +580,9 @@ def test_extract_plate_and_fine_candidates_real_decision_preview_keeps_anchor_lo
     )
     result = extract_plate_and_fine_candidates(
         ocr_text,
-        "30850005064 7345742623 2895338 05911509 49107 15052026 250",
+        "30850005064 7345742623 2895338 05911509 1215276 5892531 0104590 49107 15052026 250",
     )
-    assert result["fine"] is None
-    assert result["plate"] is None
+    assert result["fine"] == "30850005064"
+    assert result["plate"] == "05911509"
+    assert result["plate"] not in {"2895338", "1215276", "5892531", "0104590"}
     assert result["amount"] == "250"

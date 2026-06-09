@@ -384,7 +384,9 @@ async def extract_vision_fields(image_path: str, ocr_text: str = "") -> Dict[str
 
 
 async def extract_fine_details(
-    ocr_text: str, numeric_ocr_text: str = ""
+    ocr_text: str,
+    numeric_ocr_text: str = "",
+    heuristic_candidates: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Call OpenAI to extract structured fine fields from *ocr_text*.
 
@@ -443,6 +445,15 @@ async def extract_fine_details(
                 else ""
             ) or None
 
+            shared_plate: Optional[str] = None
+            shared_fine: Optional[str] = None
+            if isinstance(heuristic_candidates, dict):
+                shared_plate_ctx = int(heuristic_candidates.get("plate_ctx") or 0)
+                if heuristic_candidates.get("plate_confident") or shared_plate_ctx >= 4:
+                    shared_plate = _digits_only(str(heuristic_candidates.get("plate") or "")) or None
+                if heuristic_candidates.get("fine"):
+                    shared_fine = _digits_only(str(heuristic_candidates.get("fine") or "")) or None
+
             # Context-aware candidates from the general OCR text
             ctx_plate_cands = _context_digits_near_keywords(
                 ocr_text, _PLATE_KEYWORDS, 7, 8, window=200
@@ -465,7 +476,7 @@ async def extract_fine_details(
 
             # Fix plate if invalid length
             if not plate_val2 or not (6 <= len(plate_val2) <= 8):
-                best_plate = ctx_plate_best or _best_plate_candidate(numeric_ocr_text)
+                best_plate = shared_plate or ctx_plate_best
                 if best_plate:
                     old_conf = (
                         (result.get("vehicle_plate") or {}).get(
@@ -495,7 +506,7 @@ async def extract_fine_details(
                     or (plate_val2 and fn_val2 == plate_val2)
                     or (plate_val2 and len(fn_val2) <= len(plate_val2))
                 ):
-                    best_fn = ctx_fine_best or _best_fine_candidate(
+                    best_fn = shared_fine or ctx_fine_best or _best_fine_candidate(
                         numeric_ocr_text, plate=plate_val2
                     )
                     if is_type2_notice and best_fn and len(best_fn) not in (10, 11):
