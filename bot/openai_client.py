@@ -476,7 +476,16 @@ async def extract_fine_details(
 
             # Fix plate if invalid length
             if not plate_val2 or not (6 <= len(plate_val2) <= 8):
-                best_plate = shared_plate or ctx_plate_best
+                best_plate = _best_plate_candidate(numeric_ocr_text)
+                if (
+                    best_plate
+                    and shared_plate
+                    and len(shared_plate) == 8
+                    and len(best_plate) == 7
+                ):
+                    best_plate = shared_plate
+                if not best_plate:
+                    best_plate = shared_plate or ctx_plate_best
                 if best_plate:
                     old_conf = (
                         (result.get("vehicle_plate") or {}).get(
@@ -506,9 +515,13 @@ async def extract_fine_details(
                     or (plate_val2 and fn_val2 == plate_val2)
                     or (plate_val2 and len(fn_val2) <= len(plate_val2))
                 ):
-                    best_fn = shared_fine or ctx_fine_best or _best_fine_candidate(
-                        numeric_ocr_text, plate=plate_val2
-                    )
+                    best_fn = _best_fine_candidate(numeric_ocr_text, plate=plate_val2)
+                    if shared_fine and (
+                        not best_fn or len(shared_fine) > len(best_fn)
+                    ):
+                        best_fn = shared_fine
+                    if not best_fn:
+                        best_fn = ctx_fine_best
                     if is_type2_notice and best_fn and len(best_fn) not in (10, 11):
                         best_fn = None
                     if best_fn:
