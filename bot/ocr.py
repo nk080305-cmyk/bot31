@@ -447,8 +447,57 @@ def _extract_numeric_candidates(ocr_text: str, numeric_text: str) -> list[str]:
             raw.extend(re.findall(r"\d[\d \t\-./,:]{4,16}\d", stripped))
             raw.extend(token for token in re.split(r"\s+", stripped) if re.fullmatch(r"\d{6,12}", token))
 
+    stitched_plate_line, stitched_fine_line = _collect_anchor_stitched_candidates(ocr_text)
+    raw.extend(stitched_plate_line.keys())
+    raw.extend(stitched_fine_line.keys())
+
     cleaned = ["".join(ch for ch in token if ch.isdigit()) for token in raw]
     return [value for value in cleaned if 6 <= len(value) <= 12 and len(set(value)) > 2]
+
+
+def _stitch_digit_fragments_from_window(
+    lines: list[str],
+    start_index: int,
+    *,
+    target_lengths: set[int],
+    max_window_lines: int = 3,
+    max_fragments: int = 3,
+) -> set[str]:
+    fragments: list[str] = []
+    window = lines[start_index: min(len(lines), start_index + max_window_lines)]
+    for line in window:
+        fragments.extend(re.findall(r"\d{2,5}", line))
+
+    stitched: set[str] = set()
+    max_target_length = max(target_lengths)
+    for left in range(len(fragments)):
+        merged = ""
+        for right in range(left, min(len(fragments), left + max_fragments)):
+            merged += fragments[right]
+            if len(merged) > max_target_length:
+                break
+            if len(merged) in target_lengths:
+                stitched.add(merged)
+    return stitched
+
+
+def _collect_anchor_stitched_candidates(ocr_text: str) -> tuple[dict[str, int], dict[str, int]]:
+    lines = (ocr_text or "").splitlines()
+    stitched_plate_line: dict[str, int] = {}
+    stitched_fine_line: dict[str, int] = {}
+
+    for idx, line in enumerate(lines):
+        if any(_line_has_keyword(line, keyword) for keyword in PLATE_KEYWORDS):
+            for candidate in _stitch_digit_fragments_from_window(lines, idx, target_lengths={7, 8}):
+                if len(set(candidate)) > 2:
+                    stitched_plate_line.setdefault(candidate, idx)
+
+        if _line_has_legacy_fine_label(line):
+            for candidate in _stitch_digit_fragments_from_window(lines, idx, target_lengths={8}):
+                if len(set(candidate)) > 2:
+                    stitched_fine_line.setdefault(candidate, idx)
+
+    return stitched_plate_line, stitched_fine_line
 
 
 def _line_has_keyword(line: str, keyword: str) -> bool:
@@ -921,6 +970,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     you need to reference.
     """
     full_text = f"{ocr_text}\n{numeric_text}"
+    stitched_plate_line, stitched_fine_line = _collect_anchor_stitched_candidates(ocr_text)
     cleaned = _extract_numeric_candidates(ocr_text, numeric_text)
 
     debug = _env_flag("OCR_DEBUG", default=False)
@@ -953,6 +1003,10 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
             len(set(cleaned)),
             sorted(set(cleaned)),
         )
+        if stitched_plate_line:
+            logger.debug("OCR stitched plate candidates=%s", sorted(stitched_plate_line))
+        if stitched_fine_line:
+            logger.debug("OCR stitched fine candidates=%s", sorted(stitched_fine_line))
         plate_anchor_hits: list[tuple[str, str]] = []
         for line in ocr_text.splitlines():
             for kw in PLATE_KEYWORDS:
@@ -988,6 +1042,17 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
             date_like_values,
             debug=debug,
         )
+        for candidate, anchor_line in stitched_plate_line.items():
+            if candidate in date_like_values or _looks_like_date_digits(candidate):
+                continue
+            if candidate not in plate_candidates:
+                plate_candidates.append(candidate)
+            plate_ctx_overrides[candidate] = max(plate_ctx_overrides.get(candidate, 0), 6)
+            plate_reasons.setdefault(candidate, "decision_plate_stitched_anchor")
+            decision_plate_last_header_line[candidate] = max(
+                decision_plate_last_header_line.get(candidate, -1),
+                anchor_line,
+            )
 
     plate_profiles = (
         {n: _plate_candidate_profile(ocr_text, n) for n in set(plate_candidates)}
@@ -1136,6 +1201,14 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
             municipal_anchor_lines,
             debug=debug,
         )
+        for candidate in stitched_fine_line:
+            if candidate == best_plate or candidate in date_like_values or _looks_like_date_digits(candidate):
+                continue
+            if candidate not in fine_candidates:
+                fine_candidates.insert(0, candidate)
+            fine_ctx_overrides[candidate] = max(fine_ctx_overrides.get(candidate, 0), 4)
+            fine_reasons.setdefault(candidate, "legacy_notice_stitched_anchor")
+            priority_fine_candidates.add(candidate)
 
     if debug:
         for n in sorted(set(fine_candidates), key=lambda x: _candidate_score(x, counts, "fine", ocr_text), reverse=True)[:5]:

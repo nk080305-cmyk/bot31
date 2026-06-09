@@ -10,7 +10,7 @@ Template 1 – Legacy municipal fine notice (חניה / parking):
   must be recovered via vision or a targeted retry.
 
 Template 2 – Anchor-based decision notice (תעודת עובד הציבור):
-  Correct plate: 05911509 (8 digits, from "05911 5-09" in OCR)
+  Verified plate case in this suite: 2266111 (7 digits, may appear split in OCR)
   Correct fine:  30850005064 (11 digits, type-2 format)
   OCR issue: multiple ID-like numbers (7345742623, 2895338) must NOT
   be chosen as the vehicle plate.
@@ -297,6 +297,35 @@ def test_template1_fine_from_ocr_with_keyword():
     assert result["plate"] == "6486471"
 
 
+def test_template1_split_fine_reconstructed_for_typed_crosscheck():
+    ocr_text = (
+        "מספר דוח:\n"
+        "5190\n"
+        "3219\n"
+        "מספר רכב: 6486471\n"
+    )
+    fine_candidates = extract_fine_ocr_candidates(ocr_text, is_type2=False)
+    assert "51903219" in fine_candidates
+
+    async def mock_gpt(text: str) -> Dict[str, Any]:
+        return {
+            "plate": "6486471",
+            "fine": "51903219",
+            "confidence": {"plate": 0.88, "fine": 0.9},
+            "source": {"plate": "gpt_primary", "fine": "gpt_primary"},
+        }
+
+    result = asyncio.run(
+        extract_all(
+            ocr_text,
+            gpt_extract_fn=mock_gpt,
+            gpt_retry_plate_fn=_noop_retry_plate,
+            gpt_retry_fine_fn=_noop_retry_fine,
+        )
+    )
+    assert result["fine"] == "51903219"
+
+
 def test_template1_invalid_primary_fine_triggers_retry():
     """When primary GPT returns an invalid fine, the retry is called.
 
@@ -390,6 +419,40 @@ def test_template2_9digit_id_as_plate_rejected_by_validation():
     assert result["plate"] == "05911509", (
         "10-digit ID must be rejected and retry should return valid plate"
     )
+
+
+def test_template2_split_plate_reconstructed_for_typed_crosscheck():
+    ocr_text = (
+        "הודעה על החלטה להטיל קנס\n"
+        "תעודת עובד הציבור\n"
+        "מספר רכב:\n"
+        "2266\n"
+        "111\n"
+        "05911 5-09\n"
+        "תאור העובדות המהוות\n"
+        "מספר הודעת תשלום קנס: 30850005064\n"
+    )
+    plate_candidates = extract_plate_ocr_candidates(ocr_text)
+    assert "2266111" in plate_candidates
+
+    async def mock_gpt(text: str) -> Dict[str, Any]:
+        return {
+            "plate": "2266111",
+            "fine": "30850005064",
+            "confidence": {"plate": 0.86, "fine": 0.92},
+            "source": {"plate": "gpt_primary", "fine": "gpt_primary"},
+        }
+
+    result = asyncio.run(
+        extract_all(
+            ocr_text,
+            gpt_extract_fn=mock_gpt,
+            gpt_retry_plate_fn=_noop_retry_plate,
+            gpt_retry_fine_fn=_noop_retry_fine,
+        )
+    )
+    assert result["plate"] == "2266111"
+    assert result["plate"] != "05911509"
 
 
 # ---------------------------------------------------------------------------
