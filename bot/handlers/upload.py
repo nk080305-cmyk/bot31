@@ -379,7 +379,13 @@ async def _process_file(
 
         # --- GPT-first extraction pipeline (plate + fine) ---
         try:
-            extraction = await _extract_all(ocr_text, numeric_ocr_text)
+            extraction = await _extract_all(
+                ocr_text,
+                numeric_ocr_text,
+                is_type2=heuristic_candidates.get("is_type2"),
+                ocr_plate=heuristic_candidates.get("plate"),
+                ocr_fine=heuristic_candidates.get("fine"),
+            )
         except Exception as exc:
             logger.warning(
                 "extract_all failed for user_id=%s, falling back to heuristics: %s",
@@ -394,7 +400,7 @@ async def _process_file(
             }
 
         # Vision fields override text-based extraction when valid
-        _is_type2 = detect_type2(ocr_text)
+        _is_type2 = heuristic_candidates.get("is_type2") or detect_type2(ocr_text)
         if vision_fields.get("license_plate"):
             vp = "".join(d for d in str(vision_fields["license_plate"]) if d.isdigit())
             if is_valid_plate(vp):

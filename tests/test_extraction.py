@@ -23,7 +23,9 @@ import pytest
 from bot.extraction import (
     detect_type2,
     extract_all,
+    extract_fine_ocr_candidates,
     extract_ocr_candidates,
+    extract_plate_ocr_candidates,
     is_valid_fine,
     is_valid_plate,
     normalized_candidate_match,
@@ -632,3 +634,234 @@ def test_source_updated_to_gpt_retry_after_retry():
     )
     assert result["plate"] == "6486471"
     assert result["source"].get("plate") == "gpt_retry"
+
+
+# ---------------------------------------------------------------------------
+# Typed OCR candidate extraction
+# ---------------------------------------------------------------------------
+
+
+def test_extract_plate_ocr_candidates_returns_only_7_8_digit():
+    ocr = "מספר הודעת: 30850005064\nמספר רכב: 6486471\n9999\n05911509\n"
+    candidates = extract_plate_ocr_candidates(ocr)
+    assert "6486471" in candidates
+    assert "05911509" in candidates
+    # 11-digit fine number must NOT appear in plate candidates
+    assert "30850005064" not in candidates
+
+
+def test_extract_fine_ocr_candidates_legacy_8_digits():
+    ocr = "מספר דוח: 09224227\nרכב: 6486471\n30850005064\n"
+    candidates = extract_fine_ocr_candidates(ocr, is_type2=False)
+    assert "09224227" in candidates
+    # plate-length numbers must NOT appear in legacy fine candidates
+    assert "6486471" not in candidates
+    # type-2-length numbers must NOT appear in legacy fine candidates
+    assert "30850005064" not in candidates
+
+
+def test_extract_fine_ocr_candidates_type2_10_11_digits():
+    ocr = "מספר: 30850005064\nרכב: 6486471\n09224227\n"
+    candidates = extract_fine_ocr_candidates(ocr, is_type2=True)
+    assert "30850005064" in candidates
+    # 8-digit legacy fine must NOT appear in type-2 fine candidates
+    assert "09224227" not in candidates
+    # plate must NOT appear in type-2 fine candidates
+    assert "6486471" not in candidates
+
+
+# ---------------------------------------------------------------------------
+# Regression 1 – Legacy template: OCR heuristic fine preserved when GPT fails
+# ---------------------------------------------------------------------------
+
+
+def test_regression_legacy_ocr_fine_preserved_when_gpt_returns_invalid():
+    """Case 1 regression: GPT returns invalid fine (113723, 6 digits); OCR
+    heuristic has valid fine 09224227 (8 digits).  Pipeline must preserve
+    the OCR heuristic value instead of returning None.
+    """
+
+    async def mock_gpt(text: str) -> Dict[str, Any]:
+        # Simulates production: GPT reads "113723" from garbled OCR
+        return {
+            "plate": "6486471",
+            "fine": "113723",  # 6 digits – invalid for legacy
+            "confidence": {"plate": 0.85, "fine": 0.6},
+            "source": {"plate": "gpt_primary", "fine": "gpt_primary"},
+        }
+
+    async def mock_retry_fine(text: str) -> Dict[str, Any]:
+        # Retry also returns the same invalid value
+        return {"fine": "113723", "confidence": {"fine": 0.55}}
+
+    # OCR heuristic has found the correct fine candidate in context
+    result = asyncio.run(
+        extract_all(
+            TEMPLATE1_OCR,
+            gpt_extract_fn=mock_gpt,
+            gpt_retry_plate_fn=_noop_retry_plate,
+            gpt_retry_fine_fn=mock_retry_fine,
+            ocr_plate="6486471",
+            ocr_fine="09224227",  # OCR heuristic candidate – 8 digits, valid
+        )
+    )
+    assert result["fine"] == "09224227", (
+        f"OCR heuristic fine must be preserved when GPT pipeline fails; "
+        f"got {result['fine']!r}"
+    )
+    assert result["plate"] == "6486471"
+    assert result["source"].get("fine") == "ocr_heuristic"
+
+
+# ---------------------------------------------------------------------------
+# Regression 2 – Decision-notice: is_type2 detected via anchor markers
+# ---------------------------------------------------------------------------
+
+
+# OCR text that uses decision-notice markers but NOT the explicit type-2
+# label (to simulate garbled OCR that loses the fine-label line).
+_DECISION_MARKERS_ONLY_OCR = (
+    '——— הודעה על החלטה להטיל קנס - "תעודת עובד הציבור"\n'
+    "7345742623\n"
+    "2895338\n"
+    "05911 5-09\n"
+    "30850005064\n"
+    "תאור העובדות המהוות\n"
+)
+
+
+def test_regression_detect_type2_via_decision_notice_markers():
+    """is_type2 must be True when OCR contains decision-notice anchors even
+    if the explicit 'מספר הודעת תשלום קנס' label is absent (garbled OCR).
+    """
+    assert detect_type2(_DECISION_MARKERS_ONLY_OCR) is True
+
+
+def test_regression_type2_fine_validation_uses_correct_mode():
+    """When is_type2=True (from decision markers), an 11-digit fine must pass
+    validation; it would be wrongly rejected under is_type2=False (legacy).
+    """
+    # 11-digit fine is valid only when type-2 rules are applied
+    assert is_valid_fine("30850005064", is_type2=True) is True
+    assert is_valid_fine("30850005064", is_type2=False) is False
+
+
+def test_regression_type2_pipeline_validates_fine_with_correct_mode():
+    """When pipeline auto-detects type-2 from decision markers, the 11-digit
+    fine from GPT must be accepted (not rejected as 'invalid legacy fine').
+    """
+
+    async def mock_gpt(text: str) -> Dict[str, Any]:
+        return {
+            "plate": "05911509",
+            "fine": "30850005064",
+            "confidence": {"plate": 0.85, "fine": 0.92},
+            "source": {"plate": "gpt_primary", "fine": "gpt_primary"},
+        }
+
+    result = asyncio.run(
+        extract_all(
+            _DECISION_MARKERS_ONLY_OCR,
+            gpt_extract_fn=mock_gpt,
+            gpt_retry_plate_fn=_noop_retry_plate,
+            gpt_retry_fine_fn=_noop_retry_fine,
+        )
+    )
+    assert result["fine"] == "30850005064", (
+        f"Type-2 fine must be accepted when type-2 is auto-detected via "
+        f"decision markers; got {result['fine']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression 3 – Typed OCR cross-check: GPT plate rejected when it only
+# matches a longer generic OCR token, not a plate-length candidate
+# ---------------------------------------------------------------------------
+
+
+def test_regression_typed_crosscheck_rejects_plate_from_long_ocr_token():
+    """GPT plate 73457426 (8 digits) must be rejected when it only appears as
+    a prefix of the 10-digit ID token 7345742623 in the OCR text, and does
+    NOT exist as a standalone 7-8 digit sequence.  A generic cross-check
+    would accept it via containment; the typed check must reject it.
+    """
+
+    # OCR contains 7345742623 (10 digits) but NOT 73457426 as a standalone token
+    ocr = (
+        "7345742623\n"          # 10-digit ID – not a valid plate
+        "30850005064\n"         # 11-digit fine
+        "05911 5-09\n"          # 8-digit plate (05911509)
+        "תאור העובדות המהוות\n"  # decision-notice marker
+    )
+
+    async def mock_gpt(text: str) -> Dict[str, Any]:
+        # GPT incorrectly extracts the first 8 digits of the ID as the plate
+        return {
+            "plate": "73457426",  # first 8 digits of 7345742623 – NOT a plate
+            "fine": "30850005064",
+            "confidence": {"plate": 0.7, "fine": 0.9},
+            "source": {"plate": "gpt_primary", "fine": "gpt_primary"},
+        }
+
+    result = asyncio.run(
+        extract_all(
+            ocr,
+            gpt_extract_fn=mock_gpt,
+            gpt_retry_plate_fn=_noop_retry_plate,
+            gpt_retry_fine_fn=_noop_retry_fine,
+            ocr_plate="05911509",   # OCR heuristic correctly identified the plate
+            ocr_fine="30850005064",
+        )
+    )
+    # GPT plate 73457426 is a substring of 7345742623 but NOT a standalone
+    # plate-length OCR token → typed cross-check must reject it and fall
+    # back to the OCR heuristic plate.
+    assert result["plate"] != "73457426", (
+        "GPT plate derived from a longer ID token must be rejected by typed cross-check"
+    )
+    assert result["plate"] == "05911509", (
+        f"OCR heuristic plate must be used after typed cross-check rejects GPT plate; "
+        f"got {result['plate']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression 4 – Merge preference: stronger OCR candidate wins over
+# invalid/weaker GPT candidate (end-to-end with is_type2 parameter)
+# ---------------------------------------------------------------------------
+
+
+def test_regression_merge_prefers_ocr_over_invalid_gpt_with_explicit_is_type2():
+    """When is_type2 is passed explicitly (True), GPT primary and retry both
+    return an invalid legacy-format fine; OCR heuristic fine (11 digits, valid
+    for type-2) must be preserved in the final result.
+    """
+
+    async def mock_gpt(text: str) -> Dict[str, Any]:
+        return {
+            "plate": "05911509",
+            "fine": "09224227",  # 8-digit legacy fine – INVALID for type-2
+            "confidence": {"plate": 0.85, "fine": 0.7},
+            "source": {"plate": "gpt_primary", "fine": "gpt_primary"},
+        }
+
+    async def mock_retry_fine(text: str) -> Dict[str, Any]:
+        return {"fine": "09224227", "confidence": {"fine": 0.6}}
+
+    result = asyncio.run(
+        extract_all(
+            TEMPLATE2_OCR,
+            gpt_extract_fn=mock_gpt,
+            gpt_retry_plate_fn=_noop_retry_plate,
+            gpt_retry_fine_fn=mock_retry_fine,
+            is_type2=True,          # forced by OCR routing stage
+            ocr_plate="05911509",
+            ocr_fine="30850005064",  # OCR heuristic: 11 digits, valid for type-2
+        )
+    )
+    assert result["fine"] == "30850005064", (
+        f"OCR heuristic type-2 fine must beat an invalid GPT legacy fine; "
+        f"got {result['fine']!r}"
+    )
+    assert result["source"].get("fine") == "ocr_heuristic"
+    assert result["plate"] == "05911509"
