@@ -34,13 +34,23 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".pdf"}
 
 PLATE_KEYWORDS = ["מספר רכב", "מס רכב", "מס' רכב", "לוחית רישוי", "לוחית"]
 FINE_KEYWORDS = ["דוח", "מספר דוח", "מספר הודעה", "קנס", "מספר הודעת תשלום קנס", "הודעת תשלום קנס"]
-AMOUNT_KEYWORDS = ["סכום", "סכום הקנס", "סך", "קנס", "כפל הקנס", "לתשלום"]
+AMOUNT_KEYWORDS = [
+    "סכום",
+    "סכום הקנס",
+    "סך",
+    "קנס",
+    "כפל הקנס",
+    "לתשלום",
+    "גובה הקנס",
+    "גובה הקנם",
+]
 DECISION_NOTICE_MARKERS = [
     "הודעה על החלטה להטיל קנס",
     "תעודת עובד הציבור",
     "תאור העובדות המהוות",
 ]
 _MUNICIPAL_NOTICE_ANCHORS = ["מספר רכב", "יצרן רכב", "גובה הקנס", "הערות הפקח"]
+_MUNICIPAL_PLATE_KEYWORDS = ["רכב", "מספר רכב"]
 _DECISION_PLATE_KEYWORDS = ["מספר רכב", "מס רכב", "מס' רכב", "לוחית רישוי", "לוחית"]
 NARRATIVE_MARKERS = [
     "אני החתום מטה",
@@ -456,6 +466,15 @@ def _is_municipal_anchor_line(line: str) -> bool:
     return False
 
 
+def _is_municipal_plate_anchor_line(line: str) -> bool:
+    compact = re.sub(r"\s+", "", line or "")
+    if any(_line_has_keyword(line, kw) for kw in _MUNICIPAL_PLATE_KEYWORDS):
+        return True
+    if "רבב" in compact:
+        return True
+    return "רכב" in compact and ("מס" in compact or "מטפר" in compact or len(compact) <= 6)
+
+
 def _municipal_anchor_lines(text: str) -> list[int]:
     return [idx for idx, line in enumerate(text.splitlines()) if _is_municipal_anchor_line(line)]
 
@@ -504,6 +523,28 @@ def _decision_plate_context_score(text: str, candidate: str) -> int:
         if any(any(_line_has_keyword(neighbor, kw) for kw in _DECISION_PLATE_KEYWORDS) for neighbor in neighbor_slice):
             score += 4
     return score
+
+
+def _municipal_plate_context_score(text: str, candidate: str) -> int:
+    lines = text.splitlines()
+    if not lines:
+        return 0
+    number_re = _digits_pattern(candidate)
+    score = 0
+    for idx, line in enumerate(lines):
+        if not number_re.search(line):
+            continue
+        neighbor_slice = lines[max(0, idx - 2): min(len(lines), idx + 2)]
+        if any(_is_municipal_plate_anchor_line(neighbor) for neighbor in neighbor_slice):
+            score += 6
+    return score
+
+
+def _line_has_decision_fine_label(line: str) -> bool:
+    compact = re.sub(r"\s+", "", line or "")
+    if _line_has_keyword(line, "מספר הודעה") or _line_has_keyword(line, "מספר הודעת תשלום קנס"):
+        return True
+    return "מספר" in compact and "הודע" in compact
 
 
 def _format_candidate_summary(
@@ -684,6 +725,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     template, template_reason = _detect_fine_template_with_reason(ocr_text)
     decision_markers = _matched_keywords(ocr_text, DECISION_NOTICE_MARKERS)
     municipal_markers = _matched_keywords(ocr_text, _MUNICIPAL_NOTICE_ANCHORS)
+    municipal_anchor_lines = _municipal_anchor_lines(ocr_text)
     logger.info("Fine OCR routing template_detected=%s reason=%s", template, template_reason)
 
     if debug:
@@ -734,16 +776,28 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     def _plate_rank(n: str) -> Tuple[int, ...]:
         base_score = _candidate_score(n, counts, "plate", ocr_text)
         if template != _ANCHOR_BASED_TEMPLATE:
-            if len(municipal_markers) >= 2 and municipal_plate_anchor_line >= 0:
+            municipal_plate_score = (
+                _municipal_plate_context_score(ocr_text, n)
+                if len(municipal_markers) >= 2 or len(municipal_anchor_lines) >= 2
+                else 0
+            )
+            if (len(municipal_markers) >= 2 or len(municipal_anchor_lines) >= 2) and municipal_plate_anchor_line >= 0:
                 first_line = plate_candidate_first_line.get(n, -1)
                 return (
+                    municipal_plate_score,
                     base_score[0],
                     first_line >= municipal_plate_anchor_line,
                     base_score[1],
                     base_score[2],
                     base_score[3],
                 )
-            return base_score
+            return (
+                municipal_plate_score,
+                base_score[0],
+                base_score[1],
+                base_score[2],
+                base_score[3],
+            )
         profile = plate_profiles.get(n, {})
         return (
             base_score[0],
@@ -782,8 +836,17 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         if best_plate_pre and template == _ANCHOR_BASED_TEMPLATE and decision_markers
         else 0
     )
+    municipal_plate_ctx = (
+        _municipal_plate_context_score(ocr_text, best_plate_pre or "")
+        if best_plate_pre
+        and template == _LEGACY_TEMPLATE
+        and (len(municipal_markers) >= 2 or len(municipal_anchor_lines) >= 2)
+        else 0
+    )
     if decision_plate_ctx:
         plate_ctx = max(plate_ctx, decision_plate_ctx)
+    if municipal_plate_ctx:
+        plate_ctx = max(plate_ctx, municipal_plate_ctx)
     if best_plate_pre and plate_ctx == 0:
         if debug:
             profile = plate_profiles.get(best_plate_pre, {})
@@ -803,22 +866,40 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     # Exclude best_plate (the accepted plate, after context check) to prevent
     # the same number occupying both slots.  If best_plate was rejected (None),
     # no number is excluded so all 7-10 digit candidates can compete.
-    municipal_top_candidate_set: set[str] = set()
     priority_fine_candidates: set[str] = set()
     if template == _ANCHOR_BASED_TEMPLATE:
         fine_candidates = []
-        for n in cleaned:
-            if n == best_plate or len(n) not in (10, 11):
+        labeled_type2_candidates: list[str] = []
+        for idx, line in enumerate(lines):
+            if not _line_has_decision_fine_label(line):
                 continue
-            number_re = re.compile(
-                r"(?<!\d)%s(?!\d)" % _FLEX_SEPARATORS.join(re.escape(ch) for ch in n)
-            )
-            near_tz = any(
-                _TZ_LABEL_RE.search(line) and number_re.search(line)
-                for line in ocr_text.splitlines()
-            )
-            if not near_tz:
-                fine_candidates.append(n)
+            scope = "\n".join(lines[max(0, idx - 1): min(len(lines), idx + 12)])
+            for token in re.findall(r"\d[\d \t\-./,:]{4,16}\d", scope):
+                candidate = "".join(ch for ch in token if ch.isdigit())
+                if candidate == best_plate or len(candidate) not in (10, 11):
+                    continue
+                number_re = _digits_pattern(candidate)
+                near_tz = any(
+                    _TZ_LABEL_RE.search(scope_line) and number_re.search(scope_line)
+                    for scope_line in scope.splitlines()
+                )
+                if not near_tz:
+                    labeled_type2_candidates.append(candidate)
+        fine_candidates = labeled_type2_candidates
+        priority_fine_candidates.update(labeled_type2_candidates)
+        if not fine_candidates:
+            for n in cleaned:
+                if n == best_plate or len(n) not in (10, 11):
+                    continue
+                number_re = re.compile(
+                    r"(?<!\d)%s(?!\d)" % _FLEX_SEPARATORS.join(re.escape(ch) for ch in n)
+                )
+                near_tz = any(
+                    _TZ_LABEL_RE.search(line) and number_re.search(line)
+                    for line in ocr_text.splitlines()
+                )
+                if not near_tz:
+                    fine_candidates.append(n)
     else:
         fine_candidates = [n for n in cleaned if 7 <= len(n) <= 10 and n != best_plate]
         lines = ocr_text.splitlines()
@@ -842,31 +923,9 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
                     continue
                 labeled_notice_candidates.append(candidate)
 
-        municipal_top_candidates: list[str] = []
-        municipal_anchor_lines = _municipal_anchor_lines(ocr_text)
-        if len(municipal_anchor_lines) >= 2:
-            scan_end = min(len(lines), min(municipal_anchor_lines) + 1)
-            for idx, line in enumerate(lines[:scan_end]):
-                for token in re.findall(r"\d[\d \t\-./,:]{4,16}\d", line):
-                    candidate = "".join(ch for ch in token if ch.isdigit())
-                    if len(candidate) not in (7, 8, 9, 10) or candidate == best_plate:
-                        continue
-                    nearby_lines = lines[max(0, idx - 1): idx + 1]
-                    if any(
-                        any(_line_has_keyword(near_line, kw) for kw in PLATE_KEYWORDS)
-                        for near_line in nearby_lines
-                    ):
-                        continue
-                    if candidate in date_like_values:
-                        continue
-                    municipal_top_candidates.append(candidate)
-            municipal_top_candidate_set = set(municipal_top_candidates)
         if labeled_notice_candidates:
             fine_candidates = labeled_notice_candidates + fine_candidates
             priority_fine_candidates.update(labeled_notice_candidates)
-        if municipal_top_candidates:
-            fine_candidates = municipal_top_candidates + fine_candidates
-            priority_fine_candidates.update(municipal_top_candidates)
 
     if debug:
         for n in sorted(set(fine_candidates), key=lambda x: _candidate_score(x, counts, "fine", ocr_text), reverse=True)[:5]:
@@ -896,8 +955,6 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
 
     # Context requirement for fine
     fine_ctx = _context_score(ocr_text, best_fine_pre or "", FINE_KEYWORDS) if best_fine_pre else 0
-    if best_fine_pre and best_fine_pre in municipal_top_candidate_set:
-        fine_ctx = max(fine_ctx, 2)
     if best_fine_pre and fine_ctx == 0:
         if debug:
             logger.debug("  fine %s rejected: no context proximity", best_fine_pre)
