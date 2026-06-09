@@ -295,3 +295,34 @@ def test_extract_fine_details_type2_prefers_10_11_and_plate_anchor(monkeypatch):
     assert result["fine_number"]["value"] == "1234567890"
     assert result["fine_number"]["value"] != "123456789"
     assert result["vehicle_plate"]["value"] == "12345678"
+
+
+def test_extract_fine_details_prefers_shared_ocr_heuristics_over_numeric_first_match(monkeypatch):
+    import bot.openai_client as mod
+
+    llm_payload = json.dumps(
+        {
+            "fine_number": {"value": None, "confidence": 0.0},
+            "vehicle_plate": {"value": "", "confidence": 0.0},
+        },
+        ensure_ascii=False,
+    )
+    monkeypatch.setattr(mod, "_client", _DummyClient(llm_payload))
+
+    result = asyncio.run(
+        extract_fine_details(
+            "הודעה על החלטה להטיל קנס\nתעודת עובד הציבור\nתאור העובדות המהוות\n",
+            "2895338 05911509 30850005064",
+            heuristic_candidates={
+                "plate": "05911509",
+                "plate_ctx": 4,
+                "plate_confident": False,
+                "fine": "30850005064",
+                "fine_confident": False,
+            },
+        )
+    )
+
+    assert result["vehicle_plate"]["value"] == "05911509"
+    assert result["vehicle_plate"]["value"] != "2895338"
+    assert result["fine_number"]["value"] == "30850005064"

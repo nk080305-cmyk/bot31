@@ -52,6 +52,7 @@ DECISION_NOTICE_MARKERS = [
 _MUNICIPAL_NOTICE_ANCHORS = ["מספר רכב", "יצרן רכב", "גובה הקנס", "הערות הפקח"]
 _MUNICIPAL_PLATE_KEYWORDS = ["רכב", "מספר רכב"]
 _DECISION_PLATE_KEYWORDS = ["מספר רכב", "מס רכב", "מס' רכב", "לוחית רישוי", "לוחית"]
+_ID_NUMBER_KEYWORDS = ["תעודת זהות", "מספר זהות", 'ת"ז', "תז"]
 NARRATIVE_MARKERS = [
     "אני החתום מטה",
     "סיבות",
@@ -78,6 +79,7 @@ _LEGACY_NOTICE_LABEL_RE = re.compile(
 )
 _TZ_LABEL_RE = re.compile(r"תעודת%sזהות" % _FLEX_SEPARATORS, re.IGNORECASE)
 _DATE_TOKEN_RE = re.compile(r"(?<!\d)\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?!\d)")
+_DECISION_BODY_MARKER_RE = re.compile(r"תא[ו]?ר.*העובדות.*מהוות", re.IGNORECASE)
 _LEGACY_TEMPLATE = "legacy"
 _ANCHOR_BASED_TEMPLATE = "anchor_based"
 
@@ -430,6 +432,25 @@ def _digits_pattern(number: str) -> re.Pattern[str]:
     return re.compile(r"(?<!\d)%s(?!\d)" % _FLEX_SEPARATORS.join(re.escape(ch) for ch in number))
 
 
+def _candidate_line_indexes(lines: list[str], candidate: str) -> list[int]:
+    number_re = _digits_pattern(candidate)
+    return [idx for idx, line in enumerate(lines) if number_re.search(line)]
+
+
+def _extract_numeric_candidates(ocr_text: str, numeric_text: str) -> list[str]:
+    raw: list[str] = []
+    for text in (ocr_text, numeric_text):
+        for line in (text or "").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            raw.extend(re.findall(r"\d[\d \t\-./,:]{4,16}\d", stripped))
+            raw.extend(token for token in re.split(r"\s+", stripped) if re.fullmatch(r"\d{6,12}", token))
+
+    cleaned = ["".join(ch for ch in token if ch.isdigit()) for token in raw]
+    return [value for value in cleaned if 6 <= len(value) <= 12 and len(set(value)) > 2]
+
+
 def _line_has_keyword(line: str, keyword: str) -> bool:
     kw_re = re.compile(
         _FLEX_SEPARATORS.join(re.escape(part) for part in keyword.split()),
@@ -545,6 +566,201 @@ def _line_has_decision_fine_label(line: str) -> bool:
     if _line_has_keyword(line, "מספר הודעה") or _line_has_keyword(line, "מספר הודעת תשלום קנס"):
         return True
     return "מספר" in compact and "הודע" in compact
+
+
+def _line_has_decision_body_marker(line: str) -> bool:
+    compact = re.sub(r"\s+", "", line or "")
+    return bool(_DECISION_BODY_MARKER_RE.search(compact))
+
+
+def _line_has_id_keyword(line: str) -> bool:
+    return any(_line_has_keyword(line, keyword) for keyword in _ID_NUMBER_KEYWORDS)
+
+
+def _collect_decision_plate_candidates(
+    lines: list[str],
+    plate_candidates: list[str],
+    counts: Counter,
+    date_like_values: set[str],
+    *,
+    debug: bool = False,
+) -> tuple[list[str], dict[str, int], dict[str, str], dict[str, int]]:
+    body_start = next((idx for idx, line in enumerate(lines) if _line_has_decision_body_marker(line)), len(lines))
+    accepted: list[str] = []
+    ctx_overrides: dict[str, int] = {}
+    reasons: dict[str, str] = {}
+    last_header_line: dict[str, int] = {}
+
+    for candidate in sorted(set(plate_candidates), key=lambda value: (len(value) == 8, counts[value], value), reverse=True):
+        if candidate in date_like_values or _looks_like_date_digits(candidate):
+            if debug:
+                logger.debug("  plate %s rejected: date-like candidate", candidate)
+            continue
+
+        line_indexes = _candidate_line_indexes(lines, candidate)
+        header_indexes = [idx for idx in line_indexes if idx <= body_start]
+        if not header_indexes:
+            if debug:
+                logger.debug("  plate %s rejected: outside decision header", candidate)
+            continue
+
+        if any(
+            _line_has_id_keyword(lines[nearby])
+            for idx in header_indexes
+            for nearby in range(max(0, idx - 1), min(len(lines), idx + 2))
+        ):
+            if debug:
+                logger.debug("  plate %s rejected: near ID-number context", candidate)
+            continue
+
+        anchor_hit = any(
+            any(_line_has_keyword(lines[nearby], keyword) for keyword in _DECISION_PLATE_KEYWORDS)
+            for idx in header_indexes
+            for nearby in range(max(0, idx - 1), min(len(lines), idx + 2))
+        )
+        accepted.append(candidate)
+        last_header_line[candidate] = max(header_indexes)
+        if anchor_hit:
+            ctx_overrides[candidate] = 6
+            reasons[candidate] = "decision_plate_anchor"
+        else:
+            ctx_overrides[candidate] = 4
+            reasons[candidate] = "decision_header_fallback"
+
+    return accepted, ctx_overrides, reasons, last_header_line
+
+
+def _collect_anchor_fine_candidates(
+    lines: list[str],
+    cleaned: list[str],
+    best_plate: str | None,
+    *,
+    debug: bool = False,
+) -> tuple[list[str], set[str], dict[str, int], dict[str, str]]:
+    fine_candidates: list[str] = []
+    priority_candidates: set[str] = set()
+    ctx_overrides: dict[str, int] = {}
+    reasons: dict[str, str] = {}
+    labeled_type2_candidates: list[str] = []
+
+    for idx, line in enumerate(lines):
+        if not _line_has_decision_fine_label(line):
+            continue
+        scope = "\n".join(lines[max(0, idx - 1): min(len(lines), idx + 12)])
+        for token in re.findall(r"\d[\d \t\-./,:]{4,16}\d", scope):
+            candidate = "".join(ch for ch in token if ch.isdigit())
+            if candidate == best_plate or len(candidate) not in (10, 11):
+                continue
+            number_re = _digits_pattern(candidate)
+            near_tz = any(
+                _TZ_LABEL_RE.search(scope_line) and number_re.search(scope_line)
+                for scope_line in scope.splitlines()
+            )
+            if near_tz:
+                if debug:
+                    logger.debug("  fine %s rejected: ID number near decision fine scope", candidate)
+                continue
+            labeled_type2_candidates.append(candidate)
+            ctx_overrides[candidate] = max(ctx_overrides.get(candidate, 0), 4)
+            reasons.setdefault(candidate, "decision_notice_label_scope")
+
+    fine_candidates.extend(labeled_type2_candidates)
+    priority_candidates.update(labeled_type2_candidates)
+
+    if not fine_candidates:
+        for candidate in cleaned:
+            if candidate == best_plate or len(candidate) not in (10, 11):
+                continue
+            number_re = _digits_pattern(candidate)
+            near_tz = any(
+                _TZ_LABEL_RE.search(line) and number_re.search(line)
+                for line in lines
+            )
+            if near_tz:
+                if debug:
+                    logger.debug("  fine %s rejected: ID number outside decision label scope", candidate)
+                continue
+            fine_candidates.append(candidate)
+
+    return fine_candidates, priority_candidates, ctx_overrides, reasons
+
+
+def _collect_legacy_fine_candidates(
+    lines: list[str],
+    cleaned: list[str],
+    best_plate: str | None,
+    date_like_values: set[str],
+    municipal_markers: list[str],
+    municipal_anchor_lines: list[int],
+    *,
+    debug: bool = False,
+) -> tuple[list[str], set[str], dict[str, int], dict[str, str]]:
+    fine_candidates = [candidate for candidate in cleaned if 7 <= len(candidate) <= 10 and candidate != best_plate]
+    priority_candidates: set[str] = set()
+    ctx_overrides: dict[str, int] = {}
+    reasons: dict[str, str] = {}
+    labeled_notice_candidates: list[str] = []
+
+    for idx, line in enumerate(lines):
+        if not _line_has_legacy_fine_label(line):
+            continue
+        scope_start = max(0, idx - 1)
+        scope_end = min(len(lines), idx + 2)
+        scope = "\n".join(lines[scope_start:scope_end])
+        for token in re.findall(r"\d[\d \t\-./,:]{4,16}\d", scope):
+            candidate = "".join(ch for ch in token if ch.isdigit())
+            if len(candidate) not in (7, 8, 9, 10) or candidate == best_plate:
+                continue
+            number_re = _digits_pattern(candidate)
+            near_tz = any(
+                _TZ_LABEL_RE.search(scope_line) and number_re.search(scope_line)
+                for scope_line in scope.splitlines()
+            )
+            if near_tz or candidate in date_like_values or _looks_like_date_digits(candidate):
+                continue
+            labeled_notice_candidates.append(candidate)
+            ctx_overrides[candidate] = max(ctx_overrides.get(candidate, 0), 4)
+            reasons.setdefault(candidate, "legacy_notice_label_scope")
+
+    fine_candidates = list(labeled_notice_candidates) + fine_candidates
+    priority_candidates.update(labeled_notice_candidates)
+
+    has_municipal_structure = len(municipal_markers) >= 2 or len(municipal_anchor_lines) >= 2
+    if not has_municipal_structure:
+        return fine_candidates, priority_candidates, ctx_overrides, reasons
+
+    first_anchor_line = min(municipal_anchor_lines) if municipal_anchor_lines else len(lines)
+    municipal_candidates: list[str] = []
+    for candidate in sorted(set(cleaned), key=lambda value: (len(value) in (8, 9), len(value), value), reverse=True):
+        if candidate == best_plate or len(candidate) not in (8, 9, 10):
+            continue
+        if candidate in date_like_values or _looks_like_date_digits(candidate):
+            continue
+
+        line_indexes = _candidate_line_indexes(lines, candidate)
+        if line_indexes:
+            if min(line_indexes) > first_anchor_line:
+                if debug:
+                    logger.debug("  fine %s rejected: outside municipal header", candidate)
+                continue
+            if any(
+                _is_municipal_plate_anchor_line(lines[nearby])
+                for idx in line_indexes
+                for nearby in range(max(0, idx - 1), min(len(lines), idx + 2))
+            ):
+                if debug:
+                    logger.debug("  fine %s rejected: near municipal plate anchor", candidate)
+                continue
+            reasons.setdefault(candidate, "municipal_header_fallback")
+        else:
+            reasons.setdefault(candidate, "municipal_numeric_fallback")
+
+        municipal_candidates.append(candidate)
+        ctx_overrides[candidate] = max(ctx_overrides.get(candidate, 0), 2)
+
+    fine_candidates = municipal_candidates + fine_candidates
+    priority_candidates.update(municipal_candidates)
+    return fine_candidates, priority_candidates, ctx_overrides, reasons
 
 
 def _format_candidate_summary(
@@ -703,9 +919,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     you need to reference.
     """
     full_text = f"{ocr_text}\n{numeric_text}"
-    raw = re.findall(r"\d[\d \t\-./,:]{4,16}\d", full_text)
-    cleaned = ["".join(ch for ch in token if ch.isdigit()) for token in raw]
-    cleaned = [n for n in cleaned if 6 <= len(n) <= 12 and len(set(n)) > 2]
+    cleaned = _extract_numeric_candidates(ocr_text, numeric_text)
 
     debug = _env_flag("OCR_DEBUG", default=False)
 
@@ -749,16 +963,29 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
 
     # --- Plate selection ---------------------------------------------------
     plate_candidates = [n for n in cleaned if len(n) in (7, 8)]
+    lines = ocr_text.splitlines()
+    plate_ctx_overrides: dict[str, int] = {}
+    plate_reasons: dict[str, str] = {}
+    decision_plate_last_header_line: dict[str, int] = {}
     if template == _ANCHOR_BASED_TEMPLATE and decision_markers:
-        plate_candidates = [
-            n for n in plate_candidates if n not in date_like_values and not _looks_like_date_digits(n)
-        ]
+        (
+            plate_candidates,
+            plate_ctx_overrides,
+            plate_reasons,
+            decision_plate_last_header_line,
+        ) = _collect_decision_plate_candidates(
+            lines,
+            plate_candidates,
+            counts,
+            date_like_values,
+            debug=debug,
+        )
+
     plate_profiles = (
         {n: _plate_candidate_profile(ocr_text, n) for n in set(plate_candidates)}
         if template == _ANCHOR_BASED_TEMPLATE
         else {}
     )
-    lines = ocr_text.splitlines()
     municipal_plate_anchor_line = next(
         (
             idx
@@ -800,7 +1027,9 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
             )
         profile = plate_profiles.get(n, {})
         return (
+            plate_ctx_overrides.get(n, 0),
             base_score[0],
+            decision_plate_last_header_line.get(n, -1),
             not bool(profile.get("narrative_only", False)),
             base_score[1],
             base_score[2],
@@ -847,6 +1076,8 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         plate_ctx = max(plate_ctx, decision_plate_ctx)
     if municipal_plate_ctx:
         plate_ctx = max(plate_ctx, municipal_plate_ctx)
+    if best_plate_pre:
+        plate_ctx = max(plate_ctx, plate_ctx_overrides.get(best_plate_pre, 0))
     if best_plate_pre and plate_ctx == 0:
         if debug:
             profile = plate_profiles.get(best_plate_pre, {})
@@ -867,65 +1098,35 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     # the same number occupying both slots.  If best_plate was rejected (None),
     # no number is excluded so all 7-10 digit candidates can compete.
     priority_fine_candidates: set[str] = set()
+    fine_ctx_overrides: dict[str, int] = {}
+    fine_reasons: dict[str, str] = {}
     if template == _ANCHOR_BASED_TEMPLATE:
-        fine_candidates = []
-        labeled_type2_candidates: list[str] = []
-        for idx, line in enumerate(lines):
-            if not _line_has_decision_fine_label(line):
-                continue
-            scope = "\n".join(lines[max(0, idx - 1): min(len(lines), idx + 12)])
-            for token in re.findall(r"\d[\d \t\-./,:]{4,16}\d", scope):
-                candidate = "".join(ch for ch in token if ch.isdigit())
-                if candidate == best_plate or len(candidate) not in (10, 11):
-                    continue
-                number_re = _digits_pattern(candidate)
-                near_tz = any(
-                    _TZ_LABEL_RE.search(scope_line) and number_re.search(scope_line)
-                    for scope_line in scope.splitlines()
-                )
-                if not near_tz:
-                    labeled_type2_candidates.append(candidate)
-        fine_candidates = labeled_type2_candidates
-        priority_fine_candidates.update(labeled_type2_candidates)
-        if not fine_candidates:
-            for n in cleaned:
-                if n == best_plate or len(n) not in (10, 11):
-                    continue
-                number_re = re.compile(
-                    r"(?<!\d)%s(?!\d)" % _FLEX_SEPARATORS.join(re.escape(ch) for ch in n)
-                )
-                near_tz = any(
-                    _TZ_LABEL_RE.search(line) and number_re.search(line)
-                    for line in ocr_text.splitlines()
-                )
-                if not near_tz:
-                    fine_candidates.append(n)
+        (
+            fine_candidates,
+            priority_fine_candidates,
+            fine_ctx_overrides,
+            fine_reasons,
+        ) = _collect_anchor_fine_candidates(
+            lines,
+            cleaned,
+            best_plate,
+            debug=debug,
+        )
     else:
-        fine_candidates = [n for n in cleaned if 7 <= len(n) <= 10 and n != best_plate]
-        lines = ocr_text.splitlines()
-        labeled_notice_candidates: list[str] = []
-        for idx, line in enumerate(lines):
-            if not _line_has_legacy_fine_label(line):
-                continue
-            scope_start = max(0, idx - 1)
-            scope_end = min(len(lines), idx + 2)
-            scope = "\n".join(lines[scope_start:scope_end])
-            for token in re.findall(r"\d[\d \t\-./,:]{4,16}\d", scope):
-                candidate = "".join(ch for ch in token if ch.isdigit())
-                if len(candidate) not in (7, 8, 9, 10) or candidate == best_plate:
-                    continue
-                number_re = _digits_pattern(candidate)
-                near_tz = any(
-                    _TZ_LABEL_RE.search(scope_line) and number_re.search(scope_line)
-                    for scope_line in scope.splitlines()
-                )
-                if near_tz or candidate in date_like_values:
-                    continue
-                labeled_notice_candidates.append(candidate)
-
-        if labeled_notice_candidates:
-            fine_candidates = labeled_notice_candidates + fine_candidates
-            priority_fine_candidates.update(labeled_notice_candidates)
+        (
+            fine_candidates,
+            priority_fine_candidates,
+            fine_ctx_overrides,
+            fine_reasons,
+        ) = _collect_legacy_fine_candidates(
+            lines,
+            cleaned,
+            best_plate,
+            date_like_values,
+            municipal_markers,
+            municipal_anchor_lines,
+            debug=debug,
+        )
 
     if debug:
         for n in sorted(set(fine_candidates), key=lambda x: _candidate_score(x, counts, "fine", ocr_text), reverse=True)[:5]:
@@ -955,6 +1156,8 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
 
     # Context requirement for fine
     fine_ctx = _context_score(ocr_text, best_fine_pre or "", FINE_KEYWORDS) if best_fine_pre else 0
+    if best_fine_pre:
+        fine_ctx = max(fine_ctx, fine_ctx_overrides.get(best_fine_pre, 0))
     if best_fine_pre and fine_ctx == 0:
         if debug:
             logger.debug("  fine %s rejected: no context proximity", best_fine_pre)
@@ -1046,7 +1249,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         )
 
     logger.info(
-        "Fine OCR selected template=%s plate=%s fine=%s amount=%s plate_ctx=%d fine_ctx=%d amount_ctx=%d",
+        "Fine OCR selected template=%s plate=%s fine=%s amount=%s plate_ctx=%d fine_ctx=%d amount_ctx=%d plate_reason=%s fine_reason=%s",
         template,
         best_plate,
         best_fine,
@@ -1054,6 +1257,8 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         plate_ctx,
         fine_ctx,
         amount_ctx,
+        plate_reasons.get(best_plate or "", "keyword_context" if best_plate else "none"),
+        fine_reasons.get(best_fine or "", "keyword_context" if best_fine else "none"),
     )
 
     return {

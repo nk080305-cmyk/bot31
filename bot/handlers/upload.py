@@ -346,7 +346,11 @@ async def _process_file(
 
         # --- OpenAI extraction ---
         try:
-            details = await ai_extract_fine_details(ocr_text, numeric_ocr_text)
+            details = await ai_extract_fine_details(
+                ocr_text,
+                numeric_ocr_text,
+                heuristic_candidates=heuristic_candidates,
+            )
             details = _apply_heuristic_candidates(details, heuristic_candidates)
             details = _apply_vision_candidates(details, vision_fields)
             details = await _ensure_fine_number(details, ocr_text, numeric_ocr_text)
