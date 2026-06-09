@@ -1269,6 +1269,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         "fine_confident": fine_confident,
         "amount_confident": amount_confident,
         "plate_ctx": plate_ctx,
+        "is_type2": template == _ANCHOR_BASED_TEMPLATE,
     }
 
 
