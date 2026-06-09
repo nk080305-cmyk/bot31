@@ -40,6 +40,12 @@ from bot.ocr import extract_plate_and_fine_candidates, extract_text_with_numeric
 from bot.openai_client import extract_fine_details as ai_extract_fine_details
 from bot.openai_client import extract_fine_number_only as ai_extract_fine_number_only
 from bot.openai_client import extract_vision_fields as ai_extract_vision_fields
+from bot.extraction import (
+    detect_type2,
+    extract_all as _extract_all,
+    is_valid_fine,
+    is_valid_plate,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -116,6 +122,33 @@ async def _ensure_fine_number(
     else:
         field["value"] = current_value if current_has_local_support else None
         field["confidence"] = confidence if current_has_local_support else min(confidence, 0.4)
+    return details
+
+
+def _apply_heuristic_candidates_amount(
+    details: Dict[str, Any], candidates: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Apply OCR heuristic amount candidate to details when model output is weak.
+
+    Only affects the ``fine_amount`` field; plate and fine are handled by the
+    new GPT-first pipeline (:func:`bot.extraction.extract_all`).
+    """
+    if not isinstance(details, dict):
+        details = {}
+    if not isinstance(candidates, dict):
+        return details
+
+    if candidates.get("amount"):
+        amount_field = details.get("fine_amount")
+        if not isinstance(amount_field, dict):
+            amount_field = {}
+            details["fine_amount"] = amount_field
+        amount_value = str(amount_field.get("value") or "").strip()
+        amount_conf = amount_field.get("confidence", 0.0)
+        amount_conf = float(amount_conf) if isinstance(amount_conf, (float, int)) else 0.0
+        if candidates.get("amount_confident") and (not amount_value or amount_conf < 0.65):
+            amount_field["value"] = candidates["amount"]
+            amount_field["confidence"] = max(amount_conf, 0.65)
     return details
 
 
@@ -344,46 +377,81 @@ async def _process_file(
                 vision_fields,
             )
 
-        # --- OpenAI extraction ---
+        # --- GPT-first extraction pipeline (plate + fine) ---
+        try:
+            extraction = await _extract_all(ocr_text, numeric_ocr_text)
+        except Exception as exc:
+            logger.warning(
+                "extract_all failed for user_id=%s, falling back to heuristics: %s",
+                message.from_user.id,
+                exc,
+            )
+            extraction = {
+                "plate": heuristic_candidates.get("plate"),
+                "fine": heuristic_candidates.get("fine"),
+                "confidence": {},
+                "source": {"plate": "ocr_heuristic", "fine": "ocr_heuristic"},
+            }
+
+        # Vision fields override text-based extraction when valid
+        _is_type2 = detect_type2(ocr_text)
+        if vision_fields.get("license_plate"):
+            vp = "".join(d for d in str(vision_fields["license_plate"]) if d.isdigit())
+            if is_valid_plate(vp):
+                extraction["plate"] = vp
+                extraction.setdefault("source", {})["plate"] = "gpt_vision"
+                extraction.setdefault("confidence", {})["plate"] = 0.98
+        if vision_fields.get("fine_notice_number"):
+            vf = "".join(d for d in str(vision_fields["fine_notice_number"]) if d.isdigit())
+            if is_valid_fine(vf, is_type2=_is_type2):
+                extraction["fine"] = vf
+                extraction.setdefault("source", {})["fine"] = "gpt_vision"
+                extraction.setdefault("confidence", {})["fine"] = 0.98
+
+        logger.info(
+            "Extraction pipeline result user_id=%s case_id=%s plate=%s fine=%s source=%s",
+            message.from_user.id,
+            case_id,
+            extraction.get("plate"),
+            extraction.get("fine"),
+            extraction.get("source"),
+        )
+
+        # --- OpenAI full-details extraction (for all other fields) ---
         try:
             details = await ai_extract_fine_details(
                 ocr_text,
                 numeric_ocr_text,
                 heuristic_candidates=heuristic_candidates,
             )
-            details = _apply_heuristic_candidates(details, heuristic_candidates)
-            details = _apply_vision_candidates(details, vision_fields)
-            details = await _ensure_fine_number(details, ocr_text, numeric_ocr_text)
+            # Apply heuristic for amount only; plate/fine come from the pipeline
+            details = _apply_heuristic_candidates_amount(details, heuristic_candidates)
         except Exception as exc:
+            logger.error("ai_extract_fine_details failed for user_id=%s: %s", message.from_user.id, exc)
+            details = {}
+
+        if not details:
             if heuristic_candidates.get("plate_confident") and heuristic_candidates.get("fine_confident"):
                 logger.warning(
-                    "OpenAI extraction failed for user_id=%s; using confident OCR heuristics: %s",
+                    "OpenAI details extraction failed for user_id=%s; using OCR heuristics",
                     message.from_user.id,
-                    exc,
                 )
-                details = {
-                    "vehicle_plate": {
-                        "value": heuristic_candidates["plate"],
-                        "confidence": 0.65,
-                    },
-                    "fine_number": {
-                        "value": heuristic_candidates["fine"],
-                        "confidence": 0.7,
-                    },
-                }
-                details = _apply_vision_candidates(details, vision_fields)
-                details = await _ensure_fine_number(details, ocr_text, numeric_ocr_text)
+                details = {}
             else:
-                logger.error("Extraction failed for user_id=%s: %s", message.from_user.id, exc)
                 await message.answer(t("extraction_failed", lang))
                 return
-        details = _reconcile_vehicle_plate(
-            details,
-            heuristic_candidates,
-            vision_fields,
-            user_id=message.from_user.id,
-            case_id=case_id,
-        )
+
+        # Apply pipeline plate/fine into details (override GPT full-details for these fields)
+        if extraction.get("plate"):
+            details["vehicle_plate"] = {
+                "value": extraction["plate"],
+                "confidence": extraction.get("confidence", {}).get("plate", 0.8),
+            }
+        if extraction.get("fine"):
+            details["fine_number"] = {
+                "value": extraction["fine"],
+                "confidence": extraction.get("confidence", {}).get("fine", 0.8),
+            }
 
         await message.answer(t("extraction_done", lang))
 

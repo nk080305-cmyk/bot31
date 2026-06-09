@@ -582,6 +582,214 @@ async def extract_fine_number_only(ocr_text: str, numeric_ocr_text: str = "") ->
         return {"fine_number": None, "confidence": 0.0}
 
 
+# ---------------------------------------------------------------------------
+# GPT-first structured extraction (new pipeline)
+# ---------------------------------------------------------------------------
+
+_STRUCTURED_EXTRACTION_PROMPT = """\
+Extract the vehicle plate number and fine/ticket reference number from this \
+OCR text of an Israeli traffic fine notice.
+
+Return a JSON object with exactly these fields:
+{{
+  "plate": string or null,
+  "fine": string or null,
+  "confidence": {{
+    "plate": number between 0.0 and 1.0,
+    "fine": number between 0.0 and 1.0
+  }},
+  "source": {{
+    "plate": "gpt_primary",
+    "fine": "gpt_primary"
+  }}
+}}
+
+Rules:
+- plate (מספר רכב / לוחית רישוי): exactly 7 or 8 digits after removing \
+spaces, hyphens, and punctuation.
+- fine (מספר דוח / מספר הודעת תשלום קנס): digits only.
+  * For notices labeled "מספר הודעת תשלום קנס": fine is 10–11 digits.
+  * For all other notices: fine is typically 7–9 digits (most often 8 digits).
+- Do NOT confuse the vehicle plate with a תעודת זהות (personal ID, 9 digits).
+- Do NOT confuse the fine number with a personal ID number.
+- Do NOT invent values; return null if the field cannot be determined.
+- Do NOT return the same value for both plate and fine.
+
+OCR TEXT:
+\"\"\"
+{ocr_text}
+\"\"\"
+
+Respond ONLY with valid JSON. No explanation, no markdown fences."""
+
+_RETRY_PLATE_PROMPT = """\
+Extract ONLY the vehicle license plate number (מספר רכב / לוחית רישוי) \
+from this OCR text of an Israeli traffic fine notice.
+
+Return a JSON object with exactly:
+{{
+  "plate": string or null,
+  "confidence": {{
+    "plate": number between 0.0 and 1.0
+  }}
+}}
+
+Rules:
+- plate must be 7 or 8 digits after removing spaces, hyphens, and punctuation.
+- Do NOT return a 9-digit תעודת זהות (personal ID) as the plate.
+- Do NOT return the fine/ticket number as the plate.
+- Look for the plate near keywords like "מספר רכב", "מס' רכב", "לוחית רישוי".
+- Return null if not found.
+
+OCR TEXT:
+\"\"\"
+{ocr_text}
+\"\"\"
+
+Respond ONLY with valid JSON. No explanation, no markdown fences."""
+
+_RETRY_FINE_PROMPT = """\
+Extract ONLY the fine/ticket reference number (מספר דוח / מספר הודעת תשלום קנס) \
+from this OCR text of an Israeli traffic fine notice.
+
+Return a JSON object with exactly:
+{{
+  "fine": string or null,
+  "confidence": {{
+    "fine": number between 0.0 and 1.0
+  }}
+}}
+
+Rules:
+- fine must be digits only (remove spaces, hyphens, punctuation).
+- For notices labeled "מספר הודעת תשלום קנס": fine is 10–11 digits.
+- For other notices: fine is typically 7–9 digits (most often 8 digits).
+- Do NOT return a 9-digit תעודת זהות (personal ID) as the fine number.
+- Look for the fine near keywords: "מספר דוח", "מספר הודעה", "מספר הודעת תשלום קנס".
+- Return null if not found.
+
+OCR TEXT:
+\"\"\"
+{ocr_text}
+\"\"\"
+
+Respond ONLY with valid JSON. No explanation, no markdown fences."""
+
+
+async def gpt_extract_structured(ocr_text: str) -> Dict[str, Any]:
+    """Primary GPT call returning structured JSON with plate, fine, confidence, source.
+
+    This is the entry point for the GPT-first extraction pipeline defined in
+    :mod:`bot.extraction`.  The response is validated and normalised but **not**
+    further post-processed; the calling pipeline owns all validation logic.
+    """
+    prompt = _STRUCTURED_EXTRACTION_PROMPT.format(ocr_text=ocr_text[:5000])
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": _EXTRACTION_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.0,
+        "max_tokens": 300,
+    }
+    try:
+        write_json("llm_request_gpt_extract_structured.json", payload)
+        response = await _client.chat.completions.create(**payload)
+        write_json(
+            "llm_response_gpt_extract_structured.json",
+            {"content": response.choices[0].message.content},
+        )
+        result = json.loads(response.choices[0].message.content)
+        plate = _digits_only(str(result.get("plate") or "")) or None
+        fine = _digits_only(str(result.get("fine") or "")) or None
+        confidence = result.get("confidence") or {}
+        if not isinstance(confidence, dict):
+            confidence = {}
+        source = result.get("source") or {}
+        if not isinstance(source, dict):
+            source = {}
+        source.setdefault("plate", "gpt_primary")
+        source.setdefault("fine", "gpt_primary")
+        logger.info(
+            "gpt_extract_structured: plate=%r fine=%r confidence=%s",
+            plate,
+            fine,
+            confidence,
+        )
+        return {"plate": plate, "fine": fine, "confidence": confidence, "source": source}
+    except Exception as exc:
+        logger.error("gpt_extract_structured failed: %s", exc)
+        return {"plate": None, "fine": None, "confidence": {}, "source": {}}
+
+
+async def gpt_retry_plate(ocr_text: str) -> Dict[str, Any]:
+    """Targeted GPT retry for vehicle plate extraction only.
+
+    Called by the extraction pipeline when the primary extraction did not
+    produce a valid plate number.  Returns
+    ``{"plate": str|None, "confidence": {"plate": float}}``.
+    """
+    prompt = _RETRY_PLATE_PROMPT.format(ocr_text=ocr_text[:5000])
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": _EXTRACTION_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.0,
+        "max_tokens": 150,
+    }
+    try:
+        write_json("llm_request_gpt_retry_plate.json", payload)
+        response = await _client.chat.completions.create(**payload)
+        result = json.loads(response.choices[0].message.content)
+        plate = _digits_only(str(result.get("plate") or "")) or None
+        conf = result.get("confidence") or {}
+        if not isinstance(conf, dict):
+            conf = {"plate": float(conf) if isinstance(conf, (int, float)) else 0.6}
+        logger.info("gpt_retry_plate: plate=%r confidence=%s", plate, conf)
+        return {"plate": plate, "confidence": conf}
+    except Exception as exc:
+        logger.error("gpt_retry_plate failed: %s", exc)
+        return {"plate": None, "confidence": {"plate": 0.0}}
+
+
+async def gpt_retry_fine(ocr_text: str) -> Dict[str, Any]:
+    """Targeted GPT retry for fine-number extraction only.
+
+    Called by the extraction pipeline when the primary extraction did not
+    produce a valid fine number.  Returns
+    ``{"fine": str|None, "confidence": {"fine": float}}``.
+    """
+    prompt = _RETRY_FINE_PROMPT.format(ocr_text=ocr_text[:5000])
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": _EXTRACTION_SYSTEM},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.0,
+        "max_tokens": 150,
+    }
+    try:
+        write_json("llm_request_gpt_retry_fine.json", payload)
+        response = await _client.chat.completions.create(**payload)
+        result = json.loads(response.choices[0].message.content)
+        fine = _digits_only(str(result.get("fine") or "")) or None
+        conf = result.get("confidence") or {}
+        if not isinstance(conf, dict):
+            conf = {"fine": float(conf) if isinstance(conf, (int, float)) else 0.6}
+        logger.info("gpt_retry_fine: fine=%r confidence=%s", fine, conf)
+        return {"fine": fine, "confidence": conf}
+    except Exception as exc:
+        logger.error("gpt_retry_fine failed: %s", exc)
+        return {"fine": None, "confidence": {"fine": 0.0}}
+
+
 async def generate_appeal(
     fine_details: Dict[str, Any], appeal_reason: Optional[str] = None
 ) -> str:
