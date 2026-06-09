@@ -43,6 +43,9 @@ _STRIP_NON_DIGITS = re.compile(r"\D")
 _OCR_DIGIT_SEQUENCE = re.compile(
     r"(?<!\d)(?:\d[ \t\-./]?){5,11}\d(?!\d)"
 )
+_SHORT_DIGIT_FRAGMENT = re.compile(r"\d{2,5}")
+_PLATE_ANCHOR_RE = re.compile(r"(?:מס(?:פר|')?[ \t\-./,:_]*רכב|לוחית)", re.IGNORECASE)
+_LEGACY_FINE_ANCHOR_RE = re.compile(r"(?:מס(?:פר)?[ \t\-./,:_]*(?:דוח|הודעה)|דוח)", re.IGNORECASE)
 # Type-2 notice marker – explicit label form
 _TYPE2_RE = re.compile(
     r"מספר[ \t\-./,:_]*הודעת[ \t\-./,:_]*תשלום[ \t\-./,:_]*קנס",
@@ -58,6 +61,37 @@ _DECISION_NOTICE_ANCHOR_RE = re.compile(
 def _digits(value: str) -> str:
     """Return digits-only string."""
     return _STRIP_NON_DIGITS.sub("", value)
+
+
+def _stitch_anchor_candidates(
+    text: str,
+    *,
+    target_lengths: set[int],
+    anchor_re: re.Pattern[str],
+    max_window_lines: int = 3,
+    max_fragments: int = 3,
+) -> List[str]:
+    lines = (text or "").splitlines()
+    stitched: Dict[str, None] = {}
+    max_target_length = max(target_lengths)
+
+    for idx, line in enumerate(lines):
+        if not anchor_re.search(line):
+            continue
+        fragments: List[str] = []
+        for scope_line in lines[idx: min(len(lines), idx + max_window_lines)]:
+            fragments.extend(_SHORT_DIGIT_FRAGMENT.findall(scope_line))
+
+        for left in range(len(fragments)):
+            merged = ""
+            for right in range(left, min(len(fragments), left + max_fragments)):
+                merged += fragments[right]
+                if len(merged) > max_target_length:
+                    break
+                if len(merged) in target_lengths and len(set(merged)) > 2:
+                    stitched[merged] = None
+
+    return list(stitched)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +159,18 @@ def extract_ocr_candidates(ocr_text: str, numeric_text: str = "") -> List[str]:
         val = _digits(m.group())
         if 6 <= len(val) <= 12:
             seen[val] = None
+    for stitched in _stitch_anchor_candidates(
+        ocr_text,
+        target_lengths={7, 8},
+        anchor_re=_PLATE_ANCHOR_RE,
+    ):
+        seen[stitched] = None
+    for stitched in _stitch_anchor_candidates(
+        ocr_text,
+        target_lengths={8},
+        anchor_re=_LEGACY_FINE_ANCHOR_RE,
+    ):
+        seen[stitched] = None
     return list(seen)
 
 
@@ -141,6 +187,12 @@ def extract_plate_ocr_candidates(ocr_text: str, numeric_text: str = "") -> List[
         val = _digits(m.group())
         if len(val) in (7, 8):
             seen[val] = None
+    for stitched in _stitch_anchor_candidates(
+        ocr_text,
+        target_lengths={7, 8},
+        anchor_re=_PLATE_ANCHOR_RE,
+    ):
+        seen[stitched] = None
     return list(seen)
 
 
@@ -165,6 +217,13 @@ def extract_fine_ocr_candidates(
         else:
             if len(val) == 8:
                 seen[val] = None
+    if not is_type2:
+        for stitched in _stitch_anchor_candidates(
+            ocr_text,
+            target_lengths={8},
+            anchor_re=_LEGACY_FINE_ANCHOR_RE,
+        ):
+            seen[stitched] = None
     return list(seen)
 
 

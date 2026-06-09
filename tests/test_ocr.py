@@ -589,13 +589,15 @@ def test_extract_plate_and_fine_candidates_real_decision_preview_separates_plate
     assert result["amount"] == "250"
 
 
-def test_regression_photo1_verified_fine_wins_when_present_in_numeric_pool():
+def test_regression_photo1_verified_fine_reconstructed_into_pool_and_selected():
     ocr_text = (
-        "מספר דוח: 5190 3219\n"
+        "מספר דוח:\n"
+        "5190\n"
+        "3219\n"
         "מספר רכב: 6486471\n"
         "19052 19\n"
     )
-    numeric_text = "09224227 1905219 51 903 219 6486471"
+    numeric_text = "09224227 1905219 6486471"
     pool = _extract_numeric_candidates(ocr_text, numeric_text)
     assert "51903219" in pool
 
@@ -605,22 +607,29 @@ def test_regression_photo1_verified_fine_wins_when_present_in_numeric_pool():
     assert result["fine"] != "1905219"
 
 
-def test_regression_photo2_verified_plate_wins_for_anchor_template():
+def test_regression_photo2_verified_plate_reconstructed_into_pool_and_selected():
     ocr_text = (
         "הודעה על החלטה להטיל קנס\n"
         "תעודת עובד הציבור\n"
-        "מספר רכב: 2266111\n"
+        "מספר רכב:\n"
+        "2266\n"
+        "111\n"
         "05911 5-09\n"
         "תאור העובדות המהוות\n"
         "מספר הודעת תשלום קנס: 30850005064\n"
     )
-    numeric_text = "30850005064 05911509 2266111"
+    numeric_text = "30850005064 05911509"
     pool = _extract_numeric_candidates(ocr_text, numeric_text)
     assert "2266111" in pool
 
     result = extract_plate_and_fine_candidates(ocr_text, numeric_text)
     assert result["plate"] == "2266111"
     assert result["plate"] != "05911509"
+
+
+def test_extract_numeric_candidates_keeps_split_digit_join_for_legacy_noise():
+    pool = _extract_numeric_candidates("מספר הודעה: 19052 19\n", "")
+    assert "1905219" in pool
 
 
 def test_anchor_plate_context_fallback_does_not_override_stronger_numeric_winner():
