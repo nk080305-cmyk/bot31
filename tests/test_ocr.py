@@ -5,6 +5,7 @@ from bot.ocr import (
     _context_score,
     _detect_fine_template_with_reason,
     _detect_type2_token_proximity,
+    _extract_numeric_candidates,
     _is_multi_preprocess_enabled,
     extract_plate_and_fine_candidates,
     mask_secret,
@@ -586,3 +587,82 @@ def test_extract_plate_and_fine_candidates_real_decision_preview_separates_plate
     assert result["plate"] == "05911509"
     assert result["plate"] not in {"2895338", "1215276", "5892531", "0104590"}
     assert result["amount"] == "250"
+
+
+def test_regression_photo1_verified_fine_wins_when_present_in_numeric_pool():
+    ocr_text = (
+        "מספר דוח: 5190 3219\n"
+        "מספר רכב: 6486471\n"
+        "19052 19\n"
+    )
+    numeric_text = "09224227 1905219 51 903 219 6486471"
+    pool = _extract_numeric_candidates(ocr_text, numeric_text)
+    assert "51903219" in pool
+
+    result = extract_plate_and_fine_candidates(ocr_text, numeric_text)
+    assert result["fine"] == "51903219"
+    assert result["fine"] != "09224227"
+    assert result["fine"] != "1905219"
+
+
+def test_regression_photo2_verified_plate_wins_for_anchor_template():
+    ocr_text = (
+        "הודעה על החלטה להטיל קנס\n"
+        "תעודת עובד הציבור\n"
+        "מספר רכב: 2266111\n"
+        "05911 5-09\n"
+        "תאור העובדות המהוות\n"
+        "מספר הודעת תשלום קנס: 30850005064\n"
+    )
+    numeric_text = "30850005064 05911509 2266111"
+    pool = _extract_numeric_candidates(ocr_text, numeric_text)
+    assert "2266111" in pool
+
+    result = extract_plate_and_fine_candidates(ocr_text, numeric_text)
+    assert result["plate"] == "2266111"
+    assert result["plate"] != "05911509"
+
+
+def test_anchor_plate_context_fallback_does_not_override_stronger_numeric_winner():
+    ocr_text = (
+        "הודעה על החלטה להטיל קנס\n"
+        "תעודת עובד הציבור\n"
+        "מספר רכב: 2266111\n"
+        "05911 5-09\n"
+        "תאור העובדות המהוות\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "2266111 05911509")
+    assert result["plate"] == "2266111"
+
+
+def test_anchor_plate_prefers_7_digits_over_8_digits_when_both_valid():
+    ocr_text = (
+        "הודעה על החלטה להטיל קנס\n"
+        "תעודת עובד הציבור\n"
+        "מספר רכב: 2266111\n"
+        "מספר רכב: 05911509\n"
+        "תאור העובדות המהוות\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "2266111 05911509")
+    assert result["plate"] == "2266111"
+
+
+def test_legacy_fine_prefers_8_digits_over_7_or_9():
+    ocr_text = (
+        "מספר דוח: 51903219\n"
+        "מספר רכב: 6486471\n"
+        "מספר הודעה: 1905219\n"
+        "מספר הודעה: 519032190\n"
+    )
+    result = extract_plate_and_fine_candidates(ocr_text, "51903219 1905219 519032190 6486471")
+    assert result["fine"] == "51903219"
+
+
+def test_debug_logs_full_normalized_numeric_pool(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("OCR_DEBUG", "1")
+    ocr_text = "מספר דוח: 5190 3219\nמספר רכב: 2266111\n"
+    with caplog.at_level(logging.DEBUG, logger="bot.ocr"):
+        extract_plate_and_fine_candidates(ocr_text, "51 903 219 2266111")
+    assert any("normalized numeric pool" in r.message for r in caplog.records)

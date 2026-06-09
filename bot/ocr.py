@@ -591,7 +591,7 @@ def _collect_decision_plate_candidates(
     reasons: dict[str, str] = {}
     last_header_line: dict[str, int] = {}
 
-    for candidate in sorted(set(plate_candidates), key=lambda value: (len(value) == 8, counts[value], value), reverse=True):
+    for candidate in sorted(set(plate_candidates), key=lambda value: (len(value) == 7, counts[value], value), reverse=True):
         if candidate in date_like_values or _looks_like_date_digits(candidate):
             if debug:
                 logger.debug("  plate %s rejected: date-like candidate", candidate)
@@ -731,6 +731,7 @@ def _collect_legacy_fine_candidates(
 
     first_anchor_line = min(municipal_anchor_lines) if municipal_anchor_lines else len(lines)
     municipal_candidates: list[str] = []
+    municipal_priority_candidates: set[str] = set()
     for candidate in sorted(set(cleaned), key=lambda value: (len(value) in (8, 9), len(value), value), reverse=True):
         if candidate == best_plate or len(candidate) not in (8, 9, 10):
             continue
@@ -752,6 +753,7 @@ def _collect_legacy_fine_candidates(
                     logger.debug("  fine %s rejected: near municipal plate anchor", candidate)
                 continue
             reasons.setdefault(candidate, "municipal_header_fallback")
+            municipal_priority_candidates.add(candidate)
         else:
             reasons.setdefault(candidate, "municipal_numeric_fallback")
 
@@ -759,7 +761,7 @@ def _collect_legacy_fine_candidates(
         ctx_overrides[candidate] = max(ctx_overrides.get(candidate, 0), 2)
 
     fine_candidates = municipal_candidates + fine_candidates
-    priority_candidates.update(municipal_candidates)
+    priority_candidates.update(municipal_priority_candidates)
     return fine_candidates, priority_candidates, ctx_overrides, reasons
 
 
@@ -945,6 +947,12 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
     if debug:
         top_n = counts.most_common(10)
         logger.debug("OCR heuristic candidates (top %d): %s", len(top_n), top_n)
+        logger.debug(
+            "OCR heuristic normalized numeric pool template=%s size=%d values=%s",
+            template,
+            len(set(cleaned)),
+            sorted(set(cleaned)),
+        )
         plate_anchor_hits: list[tuple[str, str]] = []
         for line in ocr_text.splitlines():
             for kw in PLATE_KEYWORDS:
@@ -1029,6 +1037,7 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
         return (
             plate_ctx_overrides.get(n, 0),
             base_score[0],
+            len(n) == 7 and plate_reasons.get(n) == "decision_plate_anchor",
             decision_plate_last_header_line.get(n, -1),
             not bool(profile.get("narrative_only", False)),
             base_score[1],
@@ -1138,6 +1147,11 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
             fine_candidates,
             key=lambda n: (
                 n in priority_fine_candidates,
+                (
+                    len(n) == 8
+                    if template == _LEGACY_TEMPLATE
+                    else len(n) in (10, 11)
+                ),
                 n not in date_like_values,
                 _candidate_score(n, counts, "fine", ocr_text),
             ),
@@ -1246,6 +1260,33 @@ def extract_plate_and_fine_candidates(ocr_text: str, numeric_text: str) -> Dict[
             best_amount,
             amount_ctx,
             amount_confident,
+        )
+
+    if best_plate:
+        logger.info(
+            "Fine OCR plate decision template=%s plate=%s reason=%s len=%d cnt=%d ctx=%d",
+            template,
+            best_plate,
+            plate_reasons.get(best_plate, "keyword_context"),
+            len(best_plate),
+            counts[best_plate],
+            plate_ctx,
+        )
+    if best_fine:
+        logger.info(
+            "Fine OCR fine decision template=%s fine=%s reason=%s len=%d cnt=%d ctx=%d preferred_len=%s priority=%s",
+            template,
+            best_fine,
+            fine_reasons.get(best_fine, "keyword_context"),
+            len(best_fine),
+            counts[best_fine],
+            fine_ctx,
+            (
+                len(best_fine) == 8
+                if template == _LEGACY_TEMPLATE
+                else len(best_fine) in (10, 11)
+            ),
+            best_fine in priority_fine_candidates,
         )
 
     logger.info(
